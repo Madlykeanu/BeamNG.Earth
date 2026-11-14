@@ -410,6 +410,16 @@ class EraTowerTest(unittest.TestCase):
                              self._tower(1935, height=30.0, seed=seed).facade, "era() alike: no tower rule")
 
     @city
+    def test_towers_only_switch(self):
+        """OSM_YEARS_ALL_ERAS off: a pre-war tower still masonry, a low building as with no year (era() unseen)."""
+        with unittest.mock.patch.object(bld, "OSM_YEARS_ALL_ERAS", False):
+            self.assertNotEqual(base(self._tower(1931, height=200.0).facade), bld.OFFICE)
+            for k in range(12):
+                a = self._tower(1890, height=24.0, cls="apartments", seed=f"L{k}")
+                b = self._tower(None, height=24.0, cls="apartments", seed=f"L{k}")
+                self.assertEqual((a.facade, a.band, a.tank), (b.facade, b.band, b.tank))
+
+    @city
     def test_parts_take_their_buildings_year(self):
         f, b, pl = PartRulesTest._building(None, [(-20, -20, 40, 40, {"height": 60.0}),
                                                   (-10, -10, 20, 20, {"height": 200.0, "min_height": 60.0})],

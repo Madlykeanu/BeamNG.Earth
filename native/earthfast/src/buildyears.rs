@@ -15,10 +15,17 @@ use std::io::Read;
 
 pub const MAGIC: &[u8; 4] = b"OBY1";
 pub const YEAR_BASE: i64 = 1900;
-const MAX_BLOB: usize = 64 << 20; // a tile inflated at most (a dense European z12 tile is ~1 MB)
+const MAX_BLOB: usize = 64 << 20; // a tile inflated (or plain) at most (a dense European z12 tile is ~1 MB)
+const MAX_STORED: usize = 16 << 20; // a tile as stored at most (oby_decode refuses a longer one before copying it)
 
 fn inflate(raw: &[u8]) -> Result<Vec<u8>, String> {
+    if raw.len() > MAX_STORED {
+        return Err(format!("tile of {} bytes stored, past {MAX_STORED}", raw.len()));
+    }
     if raw.starts_with(MAGIC) {
+        if raw.len() > MAX_BLOB {
+            return Err(format!("plain tile past {MAX_BLOB} bytes"));
+        }
         return Ok(raw.to_vec());
     }
     let mut out = Vec::with_capacity(raw.len().saturating_mul(3).min(MAX_BLOB));
@@ -99,6 +106,9 @@ pub fn parse(raw: &[u8]) -> Result<(Vec<u64>, Vec<i16>), String> {
 /// One OSM building-year tile (as stored: raw deflate or plain) decoded: (keys uint64 ascending, years int16).
 #[pyfunction]
 pub fn oby_decode<'py>(py: Python<'py>, data: &[u8]) -> PyResult<(Py<PyAny>, Py<PyAny>)> {
+    if data.len() > MAX_STORED {
+        return Err(PyValueError::new_err(format!("tile of {} bytes stored, past {MAX_STORED}", data.len())));
+    }
     let raw = data.to_vec();
     let (k, y) = py.detach(move || parse(&raw)).map_err(PyValueError::new_err)?;
     Ok((k.into_pyarray(py).into_any().unbind(), y.into_pyarray(py).into_any().unbind()))
@@ -188,5 +198,23 @@ mod tests {
         b.extend_from_slice(&[0xff; 10]);
         b.push(0x01);
         assert!(parse(&b).is_err());
+    }
+
+    #[test]
+    fn oversized_tiles_are_errors() {
+        // a plain tile past MAX_STORED (and so past what a plain tile may be), refused before any copy or parse
+        let mut b = blob(&[4], &[1913]);
+        b.resize(MAX_STORED + 1, 0);
+        assert!(parse(&b).unwrap_err().contains("stored"));
+        // a deflate stream inflating past MAX_BLOB
+        use flate2::write::DeflateEncoder;
+        use std::io::Write;
+        let mut e = DeflateEncoder::new(Vec::new(), flate2::Compression::best());
+        let mut big = MAGIC.to_vec();
+        big.resize(MAX_BLOB + 4096, 0);
+        e.write_all(&big).unwrap();
+        let z = e.finish().unwrap();
+        assert!(z.len() < MAX_STORED);
+        assert!(parse(&z).unwrap_err().contains("inflates past"));
     }
 }

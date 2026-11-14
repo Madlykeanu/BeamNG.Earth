@@ -41,7 +41,7 @@ class FakeFetcher:
         self.files, self.fail, self.seen = files, None, []
 
     def get(self, url, *, kind="demand", headers=None, lane=None):
-        self.seen.append(url.rsplit("/", 1)[-1])
+        self.seen.append((url.rsplit("/", 1)[-1], (headers or {}).get("Range")))
         if self.fail is not None:
             raise self.fail
         body = self.files.get(url)
@@ -165,6 +165,12 @@ class BuildAndReadTest(unittest.TestCase):
     def md(self, fetcher):
         return SimpleNamespace(fetcher=fetcher, cache_dir=tempfile.mkdtemp(dir=self.tmp))
 
+    def pinned(self, files=None, fetcher=None):
+        """A map data whose year manifest is pinned on disk (MapData.warm_manifests' fetch), not yet frozen."""
+        md = self.md(fetcher or FakeFetcher(self.files() if files is None else files))
+        osmyears.shards(md).version()
+        return md
+
     def test_manifest(self):
         m = self.man
         self.assertEqual((m["format"], m["zoom"]), (1, 12))
@@ -181,9 +187,8 @@ class BuildAndReadTest(unittest.TestCase):
                 np.array([b for *_x, b in got], np.float32))
 
     def test_every_dated_building_read_back(self):
-        f = FakeFetcher(self.files())
         with mock.patch.object(osmyears, "BASE", BASE):
-            sh = osmyears.shards(self.md(f))
+            sh = osmyears.shards(self.pinned())
             got = osmyears.tiles_of(sh, LAT0 - 0.01, LON0 - 0.02, LAT0 + 0.31, LON0 + 0.41)
         self.assertEqual(dict(zip(got[0].tolist(), got[1].tolist())), WANT)
         self.assertEqual(got[0].tolist(), sorted(got[0].tolist()))
@@ -192,53 +197,125 @@ class BuildAndReadTest(unittest.TestCase):
         tiles = by.cut(*self._rows())
         holding = [t for t, (k, _y) in tiles.items() if 2 * 5 in k.tolist()]
         self.assertEqual(len(holding), 2)
-        f = FakeFetcher(self.files())
         with mock.patch.object(osmyears, "BASE", BASE):
-            sh = osmyears.shards(self.md(f))
+            sh = osmyears.shards(self.pinned())
             for d in (-0.0005, 0.0005):        # (from either side, one tile each)
                 got = osmyears.tiles_of(sh, LAT0, EDGE + d, LAT0 + 0.0001, EDGE + d)
                 self.assertEqual(dict(zip(got[0].tolist(), got[1].tolist())).get(10), 1913)
 
     def test_tile_fetch_years_and_lookup(self):
-        f = FakeFetcher(self.files())
         frame = geodesy.EnuFrame(LAT0, LON0)
         with mock.patch.object(osmyears, "BASE", BASE):
+            md = self.pinned()
             n0 = revisit.faults()
-            yrs = osmyears.Fetch(frame, -300, -300, 300, 300, self.md(f)).years()
+            yrs = osmyears.Fetch(frame, -300, -300, 300, 300, md).years()
             self.assertEqual(revisit.faults(), n0)
+            self.assertEqual(osmyears.identity(md), self.man["built"])
         self.assertEqual(osmyears.lookup(yrs, ["w34633854@78", "r3565284@1", "w3565284@2", "w6@1", None, "n1@1",
                                                "w999999@1"]).tolist(), [1931, 1890, 2001, 0, 0, 0, 0])
 
     def test_not_published_no_fault(self):
-        f = FakeFetcher({})
         frame = geodesy.EnuFrame(LAT0, LON0)
         with mock.patch.object(osmyears, "BASE", BASE):
+            md = self.pinned(files={})
             n0 = revisit.faults()
-            self.assertIsNone(osmyears.Fetch(frame, -300, -300, 300, 300, self.md(f)).years())
+            self.assertIsNone(osmyears.Fetch(frame, -300, -300, 300, 300, md).years())
             self.assertEqual(revisit.faults(), n0, "nothing published: the buildings as before, kept")
+            self.assertEqual(osmyears.identity(md), "none")
 
-    def test_unreachable_faults(self):
+    def test_nothing_pinned_yet_no_years_no_fault(self):
+        """The manifest unreachable at the process's first ask (or not asked yet): "none" for the whole process."""
+        frame = geodesy.EnuFrame(LAT0, LON0)
         f = FakeFetcher(self.files())
         f.fail = netfetch.FetchFailed("offline")
+        with mock.patch.object(osmyears, "BASE", BASE):
+            md = self.md(f)
+            n0 = revisit.faults()
+            self.assertIsNone(osmyears.Fetch(frame, -300, -300, 300, 300, md).years())
+            self.assertEqual(revisit.faults(), n0)
+            self.assertEqual(osmyears.identity(md), "none")
+            f.fail = None
+            osmyears.shards(md).version()           # (pinned now: for the next start, not this process)
+            self.assertEqual(osmyears.identity(md), "none")
+            self.assertIsNone(osmyears.Fetch(frame, -300, -300, 300, 300, md).years())
+            fresh = SimpleNamespace(fetcher=FakeFetcher(self.files()), cache_dir=md.cache_dir)
+            self.assertEqual(osmyears.identity(fresh), self.man["built"], "the next process: the pinned build")
+
+    def test_the_build_is_frozen_for_the_process(self):
+        """A newer manifest pinned while the process runs: its tiles stay keyed and built on the build it froze."""
         frame = geodesy.EnuFrame(LAT0, LON0)
         with mock.patch.object(osmyears, "BASE", BASE):
+            md = self.pinned()
+            built = osmyears.identity(md)
+            pin = os.path.join(md.cache_dir, "pagesdata", "osmyears", "manifest.json")
+            m = json.loads(open(pin).read())
+            m["built"] = "2099-01-01T00:00:00Z"
+            with open(pin, "w") as f:
+                json.dump(m, f)
+            self.assertEqual(osmyears.identity(md), built)
+            yrs = osmyears.Fetch(frame, -300, -300, 300, 300, md).years()
+            self.assertEqual(osmyears.lookup(yrs, ["w34633854@1"]).tolist(), [1931])
+            fresh = SimpleNamespace(fetcher=FakeFetcher({}), cache_dir=md.cache_dir)    # (another process)
+            self.assertEqual(osmyears.identity(fresh), "2099-01-01T00:00:00Z")
+
+    def test_unreachable_tiles_fault(self):
+        frame = geodesy.EnuFrame(LAT0, LON0)
+        with mock.patch.object(osmyears, "BASE", BASE):
+            md = self.pinned()
+            md.fetcher.fail = netfetch.FetchFailed("offline")
             n0 = revisit.faults()
-            self.assertIsNone(osmyears.Fetch(frame, -300, -300, 300, 300, self.md(f)).years())
+            self.assertIsNone(osmyears.Fetch(frame, -300, -300, 300, 300, md).years())
             self.assertEqual(revisit.faults(), n0 + 1, "built again later, with the years")
+            n = len(md.fetcher.seen)                # (DOWN_S: the next tile faults at once, nothing asked)
+            self.assertIsNone(osmyears.Fetch(frame, -300, -300, 300, 300, md).years())
+            self.assertEqual((revisit.faults(), len(md.fetcher.seen)), (n0 + 2, n))
 
     def test_a_tile_that_fails_faults(self):
         files = self.files()
-        f = FakeFetcher(files)
         frame = geodesy.EnuFrame(LAT0, LON0)
         with mock.patch.object(osmyears, "BASE", BASE):
-            md = self.md(f)
-            sh = osmyears.shards(md)
-            self.assertTrue(sh.usable())            # (the manifest had)
-            for p in self.man["parts"]:             # (then the archive gone)
+            md = self.pinned(files)
+            for p in self.man["parts"]:             # (the archive gone)
                 files.pop(f"{BASE}/{p['archive']}")
             n0 = revisit.faults()
             self.assertIsNone(osmyears.Fetch(frame, -300, -300, 300, 300, md).years())
             self.assertEqual(revisit.faults(), n0 + 1)
+
+    def test_a_hostile_directory_length_is_not_fetched(self):
+        """A directory entry claiming a 1 GB tile: refused before its range read, the tile faulted."""
+        t = by.ots.tile_id(by.SHARD_ZOOM, *self._tile_of(LAT0, LON0))
+        data = os.path.join(self.tmp, "hostile.bin")
+        with open(data, "wb") as f:
+            f.write(by.ots.deflate(by.encode_tile(np.array([4], np.uint64), np.array([1931]))))
+        arch = os.path.join(self.tmp, "hostile.pmtiles")
+        by.ots.write_pmtiles(arch, [(t, 0, 1 << 30, 1)], data, (-180.0, -85.0, 180.0, 85.0), 1, by.SHARD_ZOOM,
+                             title="x", fmt="oby1")
+        m = dict(self.man, parts=[{"archive": "hostile.pmtiles", "first": t, "last": t, "bytes": 1, "tiles": 1}])
+        files = {f"{BASE}/manifest.json": json.dumps(m).encode(), f"{BASE}/hostile.pmtiles": open(arch, "rb").read()}
+        frame = geodesy.EnuFrame(LAT0, LON0)
+        with mock.patch.object(osmyears, "BASE", BASE):
+            md = self.pinned(files)
+            n0 = revisit.faults()
+            self.assertIsNone(osmyears.Fetch(frame, -300, -300, 300, 300, md).years())
+            self.assertEqual(revisit.faults(), n0 + 1)
+        ranges = [r for n, r in md.fetcher.seen if n == "hostile.pmtiles"]
+        self.assertTrue(ranges)
+        self.assertTrue(all(int(r.split("-")[1]) < (1 << 20) for r in ranges), ranges)
+
+    def _tile_of(self, lat, lon):
+        import math
+        n = 1 << by.SHARD_ZOOM
+        x = int((lon + 180.0) / 360.0 * n)
+        y = int((1.0 - math.asinh(math.tan(math.radians(lat))) / math.pi) / 2.0 * n)
+        return x, y
+
+    def test_an_oversized_tile_is_refused(self):
+        with self.assertRaises(ValueError):
+            fast._ef.oby_decode(b"OBY1" + bytes((16 << 20) + 1))
+        with mock.patch.object(osmyears, "BASE", BASE):
+            sh = osmyears.shards(self.md(FakeFetcher({})))
+            with self.assertRaises(ValueError):
+                sh._decode(b"OBY1" + bytes(sh.MAX_TILE_BYTES), None)
 
     def test_a_manifest_of_another_format_is_not_read(self):
         files = self.files()
@@ -247,20 +324,42 @@ class BuildAndReadTest(unittest.TestCase):
         files[f"{BASE}/manifest.json"] = json.dumps(m).encode()
         frame = geodesy.EnuFrame(LAT0, LON0)
         with mock.patch.object(osmyears, "BASE", BASE):
+            md = self.pinned(files)
             n0 = revisit.faults()
-            self.assertIsNone(osmyears.Fetch(frame, -300, -300, 300, 300, self.md(FakeFetcher(files))).years())
+            self.assertIsNone(osmyears.Fetch(frame, -300, -300, 300, 300, md).years())
             self.assertEqual(revisit.faults(), n0, "a newer format: no years, no faults")
+            self.assertEqual(osmyears.identity(md), "none")
 
     def test_off(self):
         with mock.patch.object(osmyears, "ON", False):
-            self.assertIsNone(osmyears.shards(self.md(FakeFetcher(self.files()))))
+            md = self.md(FakeFetcher(self.files()))
+            self.assertIsNone(osmyears.shards(md))
+            self.assertEqual(osmyears.identity(md), "off")
         import railtags
         frame = geodesy.EnuFrame(LAT0, LON0)
         with mock.patch.object(osmyears, "BASE", BASE), mock.patch.object(railtags, "ON", False):
             n0 = revisit.faults()       # (the Pages datasets off: no years, no faults)
-            self.assertIsNone(osmyears.Fetch(frame, -300, -300, 300, 300, self.md(FakeFetcher(self.files()))).years())
+            md = self.md(FakeFetcher(self.files()))
+            self.assertIsNone(osmyears.Fetch(frame, -300, -300, 300, 300, md).years())
             self.assertEqual(revisit.faults(), n0)
+            self.assertEqual(osmyears.identity(md), "none")
         self.assertIsNone(osmyears.shards(SimpleNamespace(fetcher=None, cache_dir=self.tmp)))
+        self.assertEqual(osmyears.identity(SimpleNamespace(fetcher=None, cache_dir=self.tmp)), "off")
+
+    def test_building_tile_keys_name_the_years(self):
+        """The tiles that draw buildings are keyed on the years' identity (blockworker._md_versions(True)); the
+        others, plans and cell facts not (MapData.versions())."""
+        import blockworker
+        with mock.patch.object(osmyears, "BASE", BASE):
+            md = self.pinned()
+            md.versions = lambda: {"pipeline": 1}
+            with mock.patch.object(blockworker, "_s", SimpleNamespace(md=md)):
+                self.assertEqual(blockworker._md_versions(), {"pipeline": 1})
+                self.assertEqual(blockworker._md_versions(True), {"pipeline": 1, "osmyears": self.man["built"]})
+            off = self.md(FakeFetcher({}))
+            off.versions = lambda: {"pipeline": 1}
+            with mock.patch.object(osmyears, "ON", False), mock.patch.object(blockworker, "_s", SimpleNamespace(md=off)):
+                self.assertEqual(blockworker._md_versions(True), {"pipeline": 1, "osmyears": "off"})
 
 
 if __name__ == "__main__":

@@ -129,6 +129,13 @@ def _read(path):
 class TagShards:
     # (another dataset in the same layout, its own blob: osmyears.YearShards overrides these)
     NAME, FORMAT, NATIVE, LABEL = NAME, FORMAT, NATIVE, "osmtags shards"
+    # (a stored tile's / directory's length from the remote archive at most, checked before its range read; None: any)
+    MAX_TILE_BYTES = None
+    MAX_LEAF_BYTES = None
+
+    def _bound(self, what, n, cap):
+        if cap is not None and not 0 <= n <= cap:
+            raise ShardError(f"{self.LABEL}: a {what} of {n} bytes (at most {cap})")
 
     def _on(self):
         return ON
@@ -265,6 +272,7 @@ class TagShards:
         if h["internal_compression"] not in (1, 2) or h["tile_compression"] not in (1, 2):
             raise ShardError(f"unsupported archive (compression {h['internal_compression']}/{h['tile_compression']})")
         ro, rl = h["root_offset"], h["root_length"]
+        self._bound("root directory", rl, self.MAX_LEAF_BYTES)
         root = b[ro:ro + rl] if ro + rl <= len(b) else self._get(url, ro, ro + rl, kind, etag)[0]
         got = (h, root, etag or None)
         with self._lock:
@@ -283,6 +291,7 @@ class TagShards:
                 b = self._leaves.get(k)
             if b is not None:
                 return b
+            self._bound("leaf directory", ln, self.MAX_LEAF_BYTES)
             path = os.path.join(self._pdir(built, part), "leaf", f"{off}_{ln}")
             b = _read(path)
             if b is None or len(b) != ln:
@@ -308,6 +317,7 @@ class TagShards:
                     break
                 off, ln, leaf = e
                 if not leaf:
+                    self._bound("tile", ln, self.MAX_TILE_BYTES)
                     a = h["data_offset"] + off
                     body, _ = self._get(self._url(part), a, a + ln, kind, etag)
                     break

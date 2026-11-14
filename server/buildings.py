@@ -532,6 +532,9 @@ TOWER_ERA_FLOORS = 18
 TOWER_MASONRY_YEAR = 1940
 TOWER_MIXED_YEAR = 1970
 TOWER_MIXED_MASONRY = 0.5
+# OSM's years (osmyears.py) for every era rule (True: era()'s brick, panel, window and tank rules see them too, as 3DBAG's
+# years) or for the towers' facades alone (False: they reach tower_era only, as "_osm_year"; era() keeps 3DBAG's)
+OSM_YEARS_ALL_ERAS = True
 
 
 def tower_era(year):
@@ -1205,7 +1208,8 @@ def plan(ring, attrs, neighbours=0, lat=None, lon=None, look=None, town=False, d
     floor_h = h / nf
     # (a tower built before the curtain walls, by its year: tower_era; with a mapped material, that material)
     top_ = max(float(h or 0.0), float(attrs.get("building_height") or 0.0))
-    te = tower_era(attrs.get("_year")) if top_ >= TOWER_ERA_M or (nf or 0) >= TOWER_ERA_FLOORS else None
+    te = tower_era(attrs.get("_year") or attrs.get("_osm_year")) \
+        if top_ >= TOWER_ERA_M or (nf or 0) >= TOWER_ERA_FLOORS else None
     masonry_tower = not str(attrs.get("facade_material") or "").strip() and not (shed or barn or church) and (
         te == "masonry" or (te == "mixed" and _hash01(seed, "era tower") < TOWER_MIXED_MASONRY))
     if shed or barn:
@@ -4934,7 +4938,7 @@ def tile_buildings(frame, x0, y0, x1, y1, layers, elev, water=None, part_layers=
             if key is not None:         # (plan's random choices keyed on the feature, not where the anchor puts it)
                 at["seed_id"] = str(key)
             if row_years is not None and row_years.get(i):
-                at["_year"] = int(row_years[i])
+                at["_year" if OSM_YEARS_ALL_ERAS else "_osm_year"] = int(row_years[i])
             if roofs is not None:
                 roofs.fill(at, e, n)
             lm = landmarks.of(a["src_record"][i]) if a.get("src_record") is not None else None
@@ -5029,7 +5033,7 @@ def tile_buildings(frame, x0, y0, x1, y1, layers, elev, water=None, part_layers=
                     attrs.append({"class": at["class"], "height": ph, "num_floors": None,
                                   "roof_shape": p_rshape,
                                   "building_height": top, "_part_min": pmh, "_steeple_part": pk == steeple_k,
-                                  "_year": at.get("_year"),
+                                  "_year": at.get("_year"), "_osm_year": at.get("_osm_year"),
                                   "facade_material": pat.get("facade_material") or at.get("facade_material")
                                   or sib["facade_material"],
                                   "facade_color": p_fcol,
