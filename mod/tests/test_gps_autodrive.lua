@@ -53,6 +53,9 @@ local function fixture(path, y, radius, configure)
     getPosition = function() return { x = f.x, y = f.y, z = f.z } end,
     getDirectionVector = function() return { x = 1, y = 0, z = 0 } end,
     getVelocity = function() return { x = f.speed, y = 0, z = 0 } end,
+    getSpawnWorldOOBB = function() return {
+      getHalfExtents = function() return { x = 1, y = 2.5, z = 1 } end,
+    } end,
     queueLuaCommand = function(_, command)
       local fn = assert(loadstring(command))
       setfenv(fn, env)()
@@ -62,6 +65,10 @@ local function fixture(path, y, radius, configure)
     requestRoute = function() f.answer = f.route; return true end,
     takeRoute = function() local answer = f.answer; f.answer = nil; return answer end,
     serverHealthy = function() return f.healthy end,
+    autodriveReady = function()
+      if f.driveReady ~= nil then return f.driveReady end
+      return f.healthy
+    end,
   }
   core_groundMarkers = { routePlanner = {}, setPath = function(target)
     f.arrows = f.arrows + 1
@@ -281,7 +288,7 @@ do
   f = parallel(true, 20, true)
   for _ = 1, 100 do f:step(); if recoveries > 0 then break end end
   f:step()
-  T.check(recoveries == 1 and f.y == 0 and f.x > 40 and #f.drives > 0 and f.gps.status().off == 0,
+  T.check(recoveries == 1 and f.y == -3 and f.x > 40 and #f.drives > 0 and f.gps.status().off == 3,
     'after recovering to the intended road, normal GPS polling starts a connected forward path')
   recoveries, moveOnRecovery = 0, false
   f = parallel(false)
@@ -303,7 +310,7 @@ do
   f = parallel(true, 40, true, 10)
   for _ = 1, 100 do f:step(); if recoveries > 0 then break end end
   f:step()
-  T.check(recoveries == 1 and f.y == 10 and #f.drives > 0 and f.gps.status().off == 10,
+  T.check(recoveries == 1 and f.y == 7 and #f.drives > 0 and f.gps.status().off == 7,
     'polling resumes a connected route after recovering onto a road offset from the planned line')
   recoveries, moveOnRecovery = 0, false
   f = parallel(true, 60, true, 26)
@@ -497,6 +504,27 @@ do
   T.check(#f.drives == 3, 'server recovery restarts the route')
 end
 
+-- Late terrain prefetch leaves the current ground usable without restarting its AI route.
+do
+  local f = fixture()
+  local starts = #f.drives
+  f.healthy, f.driveReady = false, true
+  f:step()
+  T.check(f.modes[#f.modes] ~= 'stop', 'a late terrain prefetch does not brake on the loaded road')
+  T.check(#f.drives == starts, 'a late terrain prefetch preserves the active lane-aware route')
+  f.driveReady = false; f:step()
+  T.check(f.modes[#f.modes] == 'stop', 'connection, resync or terrain-error unavailability still holds')
+  f.driveReady = true; f:step()
+  T.check(#f.drives == starts + 1, 'a genuine readiness recovery restarts the route normally')
+end
+
+do
+  local f = fixture()
+  beamngEarth_core.autodriveReady = nil
+  f.healthy = false; f:step()
+  T.check(f.modes[#f.modes] == 'stop', 'older core modules retain the server-health hold')
+end
+
 -- The stock AI clears its route on completion but stays in manual mode. Its GE notification is asynchronous.
 do
   local f = fixture({ 'w', 'j' })
@@ -661,7 +689,7 @@ end
 do
   local oldSpawn, oldQuat, oldLog = spawn, quatFromDir, log
   local placed
-  spawn = { safeTeleport = function(_, p, q) placed = { pos = p, direction = q } end }
+  spawn = { safeTeleport = function(_, p, q, _, _, _, centred) placed = { pos = p, direction = q, centred = centred } end }
   quatFromDir = function(d) return d end
   log = function() end
   local f = fixture({ 'j', 's', 't' }, 0, 6, function(f)
@@ -677,10 +705,11 @@ do
   T.check(not placed, 'the first no-progress interval retries without teleporting')
   f:step(); f:step(31)
   T.check(placed and f.gps.autoRecoveries == 1, 'the second no-progress interval invokes recovery')
-  T.check(placed and math.abs(placed.pos.x - 190) < 1e-9 and placed.pos.y == 0,
-    'recovery places the vehicle 150 metres ahead on the route')
+  T.check(placed and math.abs(placed.pos.x - 190) < 1e-9 and placed.pos.y == -3,
+    'recovery places the vehicle 150 metres ahead in its legal lane')
   T.check(placed and placed.direction.x > 0.99 and placed.direction.y == 0,
     'recovery faces east even though the selected edge is stored westbound')
+  T.check(placed and placed.centred, 'the selected lane point centres the vehicle body, not its offset reference node')
   spawn, quatFromDir, log = oldSpawn, oldQuat, oldLog
 end
 
