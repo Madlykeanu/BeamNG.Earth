@@ -605,5 +605,9 @@ do  -- a fixed view distance: its fog (the scene ~95 % fogged where the engine s
   T.check(W.viewFogFloor(get('horizon', 1)) == 0, 'the real horizon: no floor')
   T.check(W.viewFogFloor(get('fixed', 0)) == 0 and W.viewFogFloor(get('fixed', nil)) == 0, 'no distance: no floor')
   T.check(W.viewFogFloor(function() return nil end) == 0, 'no settings: no floor')
+  -- (the engine thins its fog with height: 2 km up under a 1 km fog height the density is e^2 more, the same 3 optical
+  -- depths at the clip; capped at the menu's maximum)
+  T.check(math.abs(W.viewFogFloor(get('fixed', 1), 2000, 1000) - 0.003 * math.exp(2)) < 1e-12, 'fixed 1 km at 2 km up')
+  T.check(W.viewFogFloor(get('fixed', 1), 9000, 1000) == W.FOG_DENSITY_MAX, 'capped at the menu maximum')
 end
 T.done('test_weather')

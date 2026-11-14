@@ -192,7 +192,9 @@ end
 -- the scene is VIEW_FOG_DEPTH optical depths into the fog there (exp(-3): ~95 %), not cut off against a clear sky; 0
 -- with the real horizon. 1 km: 0.003; 20 km: 1.5e-4; from 75 km the level's own 4e-5 is more.
 M.VIEW_FOG_DEPTH = 3.0
-function M.viewFogFloor(get)
+-- The engine's density for that (groundZ, fogHeight: as fogDensityFor, the engine thins its fog with height: 2 km up
+-- under a 1 km fog height a raw 3 / D would give 0.4 optical depths, Codex 2026-11-14), at most FOG_DENSITY_MAX.
+function M.viewFogFloor(get, groundZ, fogHeight)
   get = get or (function(k)
     local st = rawget(_G, 'beamngEarth_settings')
     return st and st.get and st.get(k)
@@ -200,7 +202,7 @@ function M.viewFogFloor(get)
   if get('viewDistanceMode') ~= 'fixed' then return 0 end
   local km = tonumber(get('viewDistanceKm'))
   if not km or km <= 0 then return 0 end
-  return M.VIEW_FOG_DEPTH / (km * 1000)
+  return M.fogDensityFor(M.VIEW_FOG_DEPTH / (km * 1000), groundZ, tonumber(fogHeight) or 1000)
 end
 
 -- Pure: the share of the fog kept with the camera h m over the ground (1 low down, 0 high up; FOG_FADE_*).
@@ -662,6 +664,7 @@ local function hideRainInMap()
   rainHidden = want
 end
 
+local viewFog       -- (below: a fixed view distance's fog)
 local function apply(e)
   local c = S.cur
   setIf(e.getCloudCover, e.setCloudCover, c.coverage, 0.005)
@@ -687,7 +690,9 @@ local function apply(e)
     if not have or have ~= 0 then envCall(e.setFogDensity, 0) end
   elseif S.groundZ then
     local want = M.fogDensityFor(c.fogSigma, S.groundZ, c.fogHeight) * M.fogAltitudeShare(camH)
-    if not (m3 and m3.isActive and m3.isActive()) then want = math.max(want, M.viewFogFloor()) end   -- (driving only)
+    if not (m3 and m3.isActive and m3.isActive()) then      -- (driving only)
+      want = math.max(want, M.viewFogFloor(nil, S.groundZ, c.fogHeight))
+    end
     local have = e.getFogDensity and tonumber((e.getFogDensity()))
     if not have or math.abs(have - want) > 0.02 * want then envCall(e.setFogDensity, want) end
     setIf(e.getFogAtmosphereHeight, e.setFogAtmosphereHeight, c.fogHeight, 1)
@@ -796,6 +801,26 @@ local function switchToManual()
     .. '. Choose Real in the BeamNG.Earth settings to go back.')
 end
 
+-- A fixed view distance's fog in every weather mode (real weather's apply takes it into its own density too; manual or
+-- paused weather never runs apply): raised to the floor while driving, the density it replaced put back when the floor
+-- goes (the setting, or the 3D map open), unless something else set the fog meanwhile.
+viewFog = function(e, mapOn)
+  if not (e.getFogDensity and e.setFogDensity) then return end
+  local have = tonumber((e.getFogDensity()))
+  if not have then return end
+  if S.viewFogSet and math.abs(have - S.viewFogSet) > 1e-9 then S.viewFogBase, S.viewFogSet = nil, nil end
+  local h = e.getFogAtmosphereHeight and tonumber((e.getFogAtmosphereHeight())) or nil
+  local floor = mapOn and 0 or M.viewFogFloor(nil, S.groundZ, h)
+  if floor > 0 and have < floor * 0.98 then
+    if S.viewFogBase == nil then S.viewFogBase = have end
+    envCall(e.setFogDensity, floor)
+    S.viewFogSet = floor
+  elseif floor == 0 and S.viewFogBase ~= nil then
+    envCall(e.setFogDensity, S.viewFogBase)
+    S.viewFogBase, S.viewFogSet = nil, nil
+  end
+end
+
 local function update(dt)
   if not S.inOurLevel or not scenetree.MissionGroup then return end
   local e = env()
@@ -813,7 +838,8 @@ local function update(dt)
   if S.mapTimer >= 0.25 then
     S.mapTimer = 0
     local m3 = rawget(_G, 'beamngEarth_map3d')
-    if m3 and m3.isActive and m3.isActive() then
+    local mapOn = m3 and m3.isActive and m3.isActive()
+    if mapOn then
       local camH = cameraOverGround()
       hideCloudsHigh(camH)
       if camH and camH >= M.FOG_FADE_TO_M then
@@ -821,6 +847,7 @@ local function update(dt)
         if not have or have ~= 0 then envCall(e.setFogDensity, 0) end
       end
     end
+    viewFog(e, mapOn)
   end
   if S.clock < S.graceUntil or S.mission then return end
   S.gravTimer = S.gravTimer + dt
