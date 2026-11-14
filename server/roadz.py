@@ -191,6 +191,12 @@ PREFETCHED_WAIT_S = float(os.environ.get("BNGE_LIDAR_PREFETCH_WAIT", "0"))
 PREFETCH_CELLS = int(os.environ.get("BNGE_LIDAR_PREFETCH_CELLS", "4"))     # cells read at once (each: the node pool)
 PREFETCH_POLL_S = 1.0       # s between the prefetch's looks at the cells the run's processes asked for
 PREFETCH_FAR_M = 8000.0     # m: a queued cell this far from the player when its turn comes is dropped (teleported away)
+# ... and a cell a planning process asked for (a want file): planning a cell near the player reads its neighbours'
+# roads, and their candidates' deck ends lie in the cells beyond, 8-16 km out at Fells Point (z14 cells ~1.9 km). Those
+# were dropped at PREFETCH_FAR_M, so they were never read, the rule stood for them on every visit, and no plan near
+# their edge, nor any block or road tile built on one, was ever kept (a 16 GB Windows PC, the small tier with no late
+# pool to read them: 0 blocks kept in four sessions, 2026-11-14)
+PREFETCH_WANT_FAR_M = 24000.0
 PREFETCH_RETRY_S = 60.0     # s before a cell whose read failed is read again
 WANT_DIR = "want"
 _tl = threading.local()     # .prefetch: this thread reads for the prefetch (its reads never stop: _read)
@@ -750,6 +756,14 @@ class RoadZ:
                     if src == "lidar":      # (its elevated ground stretches: written before the lines)
                         with open(p + ".gaps.json", encoding="utf-8") as fh:
                             got.gaps = [(str(f), tuple(a), tuple(b)) for f, a, b in json.load(fh)]
+                    # (used: the download cache's eviction takes a file's mtime for its last use when this server's
+                    # own process did not read it, and these are read in the workers; a cell read on every visit was
+                    # as old as its download, among the first evicted when the disk ran short of its reserve, and
+                    # the next visit read its ~5 MB again and planned on the rule meanwhile: Windows PC, 2026-11-14)
+                    import cache as cachemod
+                    cachemod.touch_once(p)
+                    if src == "lidar":
+                        cachemod.touch_once(p + ".gaps.json")
                 except Exception as e:
                     log.debug("roadz read %s: %s", p, e)
                     got = None
@@ -873,14 +887,16 @@ class RoadZ:
             if st is None:
                 st = self._pf_state = {"queue": {}, "seq": 0, "where": None, "done": {}, "failed": {}, "threads": 0,
                                        "busy": set(), "cv": threading.Condition(), "polled": 0.0,
-                                       "t0": None, "last": None, "n": 0, "logged": True}
+                                       "t0": None, "last": None, "n": 0, "logged": True,
+                                       "wanted": set()}     # (queued cells a planning process asked for: _pf_wants)
             return st
 
     def prefetch(self, keys, where=None):
         """Queue cells keys' road heights (every source at each: the lidar's first of all) to be read in the
         background, PREFETCH_CELLS at once, a prefetch's reads never stopped (_read); where(key) -> m from the player
         (the server's latest focus, kept for the next calls too): the nearest queued cell is read first, one past
-        PREFETCH_FAR_M dropped; without one, the newest call's cells first in their order. Returns at once."""
+        PREFETCH_FAR_M dropped (one a planning process asked for: past PREFETCH_WANT_FAR_M); without one, the newest
+        call's cells first in their order. Returns at once."""
         if not self.enabled or self.fetcher is None:
             return
         st = self._pf()
@@ -946,6 +962,7 @@ class RoadZ:
                 continue
             if k not in st["done"] and k not in st["busy"]:
                 st["queue"].setdefault(k, st["seq"])
+                st["wanted"].add(k)         # (dropped only past PREFETCH_WANT_FAR_M: _pf_next)
                 st["logged"] = False
                 if st["t0"] is None:
                     st["t0"] = now
@@ -964,13 +981,14 @@ class RoadZ:
                     d = float(where(k))
                 except Exception:
                     d = float("inf")
-                if d > PREFETCH_FAR_M:
+                if d > (PREFETCH_WANT_FAR_M if k in st["wanted"] else PREFETCH_FAR_M):
                     del st["queue"][k]      # (the player is far from it now: asked again when near)
+                    st["wanted"].discard(k)
                     continue
             if bd is None or (d, str(k)) < bd:
                 best, bd = k, (d, str(k))
         if best is not None:
-            del st["queue"][best]
+            del st["queue"][best]       # (still "wanted" while read, and when queued again after a failed read)
         return best
 
     def _pf_loop(self):
@@ -1008,6 +1026,7 @@ class RoadZ:
                 if ok:
                     st["done"][k] = st["last"]
                     st["failed"].pop(k, None)
+                    st["wanted"].discard(k)
                 else:
                     st["failed"][k] = st["last"]
                     st["queue"].setdefault(k, st["seq"])    # (again once PREFETCH_RETRY_S is past)
