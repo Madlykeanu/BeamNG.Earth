@@ -301,7 +301,7 @@ class RailTags(Shards):
     def join(self, feats, key):
         """Add the OSM tags (attrs osm_railway, osm_gauge, osm_electrified, osm_service, osm_usage) to cell key's rail
         segments, and its crossing / mast nodes (feats._rail_nodes: [(lon, lat, tags)]), in place. Nothing when the
-        shard cannot be had."""
+        shard cannot be had: False then, and a revisit fault (the caller joins again later)."""
         sub = feats.attrs.get("subtype")
         if sub is None or not len(feats):
             return
@@ -310,7 +310,11 @@ class RailTags(Shards):
             return
         sh = self.of_cell(key)
         if sh is None:
-            return
+            if self.version() is None:      # (not published, or no build known yet: nothing to join, no fault)
+                return None
+            import revisit                  # (a known build's shard unreachable: what is built on the untagged
+            revisit.fault()                 # layer is not kept, and the caller joins again next time)
+            return False
         ways = sh.get("ways", {})
         rec = feats.attrs.get("src_record")
         cols = {c: np.full(len(feats), None, object) for c in COLUMNS}
@@ -416,7 +420,7 @@ class LaneTags(Shards):
         - Germany's road rules from its "rules" (tools/build_lane_tags.py): attrs osm_priority_road (designated /
           end / yes_unposted) and osm_zone_maxspeed (DE:30 / DE:20 / DE:10), lane_attr(k) for k in RULE_COLUMNS;
         - its German sign nodes in the cell (junction signs and the mapped Ortstafeln), for sign_nodes(feats).
-        Nothing when the shard cannot be had; a shard without "rules" or "nodes" (an older build) joins none of them.
+        Nothing when the shard cannot be had (False then, and a revisit fault: the caller joins again later); a shard without "rules" or "nodes" (an older build) joins none of them.
         The way ids are parsed and found in the shard natively (fast.way_tag_rows, fast.lane_parts), each distinct tag
         set's columns made once and the parts share the shard's tag sets (LANE_PARTS): a regex, a numpy search and a
         tag copy per road and per way part and a rule-table slice per road were ~14 % of a dense Manhattan road tile
@@ -430,7 +434,11 @@ class LaneTags(Shards):
             return
         sh = self.of_cell(key)
         if sh is None:
-            return
+            if self.version() is None:      # (not published, or no build known yet: nothing to join, no fault)
+                return None
+            import revisit                  # (a known build's shard unreachable: what is built on the untagged
+            revisit.fault()                 # layer is not kept, and the caller joins again next time)
+            return False
         ways = sh.get("ways", {})
         rec = feats.attrs.get("src_record")
         n = len(feats)

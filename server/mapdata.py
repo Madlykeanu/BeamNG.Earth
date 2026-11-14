@@ -430,8 +430,8 @@ class MapData:
         if built is None or feats.__dict__.get("_rails_built") == built:
             return
         try:
-            rt.join(feats, key)
-            feats.__dict__["_rails_built"] = built
+            if rt.join(feats, key) is not False:    # (False: its shard unreachable, joined again next time)
+                feats.__dict__["_rails_built"] = built
         except Exception as e:      # (Overture's classes alone)
             log.debug("railtags join %s: %s: %s", key, type(e).__name__, e)
 
@@ -445,8 +445,8 @@ class MapData:
         if built is None or feats.__dict__.get("_lanes_built") == built:
             return
         try:
-            lt.join(feats, key)
-            feats.__dict__["_lanes_built"] = built
+            if lt.join(feats, key) is not False:    # (False: its shard unreachable, joined again next time)
+                feats.__dict__["_lanes_built"] = built
         except Exception as e:      # (no lane data: the markings' guesses)
             log.debug("lanetags join %s: %s: %s", key, type(e).__name__, e)
 
