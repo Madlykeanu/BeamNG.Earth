@@ -198,6 +198,7 @@ class Shards:
         self.down_at = 0.0
         self.fetching = None        # threading.Event while a manifest fetch runs (the others wait for its answer)
         self.shard_down = {}        # (x, y) -> when it could not be had (SHARD_RETRY_S)
+        self.missing = False        # the last manifest fetch was a 404 (not published), not a failure (osmyears.py)
 
     def known(self):
         """The build in use as far as known without asking the network (versions(): every tile's cache key); before
@@ -299,11 +300,13 @@ class Shards:
                 log.debug("%s manifest: %s: %s", self.name, type(e).__name__, e)
                 with self.lock:
                     self.down_at = now
+                    self.missing = isinstance(e, netfetch.NotFound)
                     return self.built   # (a build learnt before stays in use)
             with self.lock:
                 if built != self.built:
                     self.shards.clear()
                 self.built, self.data, self.checked = built, data, now
+                self.missing = False
             return built
         finally:
             with self.lock:
