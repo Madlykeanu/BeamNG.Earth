@@ -188,6 +188,21 @@ function M.fogDensityFor(sigma, groundZ, height)
   return math.min(d, M.FOG_DENSITY_MAX)
 end
 
+-- The fog a fixed view distance needs (the settings' viewDistanceMode 'fixed'): the engine draws nothing past it, so
+-- the scene is VIEW_FOG_DEPTH optical depths into the fog there (exp(-3): ~95 %), not cut off against a clear sky; 0
+-- with the real horizon. 1 km: 0.003; 20 km: 1.5e-4; from 75 km the level's own 4e-5 is more.
+M.VIEW_FOG_DEPTH = 3.0
+function M.viewFogFloor(get)
+  get = get or (function(k)
+    local st = rawget(_G, 'beamngEarth_settings')
+    return st and st.get and st.get(k)
+  end)
+  if get('viewDistanceMode') ~= 'fixed' then return 0 end
+  local km = tonumber(get('viewDistanceKm'))
+  if not km or km <= 0 then return 0 end
+  return M.VIEW_FOG_DEPTH / (km * 1000)
+end
+
 -- Pure: the share of the fog kept with the camera h m over the ground (1 low down, 0 high up; FOG_FADE_*).
 function M.fogAltitudeShare(h)
   h = tonumber(h)
@@ -672,6 +687,7 @@ local function apply(e)
     if not have or have ~= 0 then envCall(e.setFogDensity, 0) end
   elseif S.groundZ then
     local want = M.fogDensityFor(c.fogSigma, S.groundZ, c.fogHeight) * M.fogAltitudeShare(camH)
+    if not (m3 and m3.isActive and m3.isActive()) then want = math.max(want, M.viewFogFloor()) end   -- (driving only)
     local have = e.getFogDensity and tonumber((e.getFogDensity()))
     if not have or math.abs(have - want) > 0.02 * want then envCall(e.setFogDensity, want) end
     setIf(e.getFogAtmosphereHeight, e.setFogAtmosphereHeight, c.fogHeight, 1)

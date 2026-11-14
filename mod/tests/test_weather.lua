@@ -598,4 +598,12 @@ do
   T.check(not W.cloudsHiddenAt(5000, false) and W.cloudsHiddenAt(15000, false), 'clouds: hidden far above them')
   T.check(W.cloudsHiddenAt(11000, true) and not W.cloudsHiddenAt(9000, true), 'clouds: shown again lower (hysteresis)')
 end
+do  -- a fixed view distance: its fog (the scene ~95 % fogged where the engine stops drawing), none with the horizon
+  local function get(mode, km) return function(k) if k == 'viewDistanceMode' then return mode end return km end end
+  T.check(math.abs(W.viewFogFloor(get('fixed', 1)) - 0.003) < 1e-12, 'fixed 1 km: density 0.003')
+  T.check(math.abs(W.viewFogFloor(get('fixed', 20)) - 1.5e-4) < 1e-12, 'fixed 20 km: 1.5e-4')
+  T.check(W.viewFogFloor(get('horizon', 1)) == 0, 'the real horizon: no floor')
+  T.check(W.viewFogFloor(get('fixed', 0)) == 0 and W.viewFogFloor(get('fixed', nil)) == 0, 'no distance: no floor')
+  T.check(W.viewFogFloor(function() return nil end) == 0, 'no settings: no floor')
+end
 T.done('test_weather')
