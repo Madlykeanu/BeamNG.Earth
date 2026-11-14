@@ -352,6 +352,9 @@ end
 M.onReset=M.reset
 function M.onExtensionUnloaded()
   M.reset()
+  if beamngEarth_oncomingPass and beamngEarth_oncomingPass.active() then
+    beamngEarth_oncomingPass.reset();ai.setMode('stop')
+  end
 end
 
 function M.bindPath(ids,md,started)
@@ -397,8 +400,9 @@ local function trafficObjects()
 end
 
 local function probe()
+  local oncoming=beamngEarth_oncomingPass
   local function unavailable()
-    return nil
+    return oncoming and oncoming.active() and {cap=0,phase='waiting',reason='passing road unavailable'} or nil
   end
   local p,h=obj:getFrontPosition(),obj:getDirectionVector()
   local a,b=mapmgr.findBestRoad(p,h)
@@ -426,6 +430,9 @@ local function probe()
   lastProbe.hit=hit and hit.distance
   local legal=bound.graph[a][b].speedLimit
   local ego={id=obj:getId(),width=width,length=length,height=obj:getInitialHeight(),surface=surface}
+  if oncoming and oncoming.active() then
+    return oncoming.update(M,bound,path,c,hit,ego,trafficObjects(),cast,speed,legal,a,b)
+  end
   local distance=goal and M.alongRoute(c,goal.point)
   if goal and (not distance or distance < -length-1) then goal=nil end
   if goal then
@@ -464,11 +471,23 @@ local function probe()
       return {cap=4,legal=legal,phase='passing'}
     end
   end
+  if not goal then
+    if not oncoming and extensions and extensions.load then
+      extensions.load('beamngEarth_oncomingPass');oncoming=beamngEarth_oncomingPass
+    end
+    if oncoming then
+      local result=oncoming.update(M,bound,path,c,hit,ego,objects,cast,speed,legal,a,b)
+      if result then return result end
+    end
+  end
   return {cap=goal and 0 or normalCap,legal=legal,phase='blocked',reason='no clear legal corridor'}
 end
 
 function M.updateGFX(dt)
   if not path or not bound or not mapmgr or mapmgr.mapData~=bound or not ai or ai.mode~='manual' then
+    if ai and ai.mode~='manual' and beamngEarth_oncomingPass and not beamngEarth_oncomingPass.suspended() then
+      beamngEarth_oncomingPass.reset()
+    end
     release();goal=nil;phase='idle';return
   end
   elapsed=elapsed+(dt or 0)
@@ -487,7 +506,7 @@ end
 
 function M.status()
   return {phase=phase,reason=reason,holding=applied~=nil,speedCap=applied,detections=detections,passes=passes,
-    bound=bound~=nil,probe=lastProbe}
+    bound=bound~=nil,probe=lastProbe,oncoming=beamngEarth_oncomingPass and beamngEarth_oncomingPass.status()}
 end
 
 return M
