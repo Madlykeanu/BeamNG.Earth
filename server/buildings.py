@@ -533,8 +533,10 @@ TOWER_MASONRY_YEAR = 1940
 TOWER_MIXED_YEAR = 1970
 TOWER_MIXED_MASONRY = 0.5
 # OSM's years (osmyears.py) for every era rule (True: era()'s brick, panel, window and tank rules see them too, as 3DBAG's
-# years) or for the towers' facades alone (False: they reach tower_era only, as "_osm_year"; era() keeps 3DBAG's)
-OSM_YEARS_ALL_ERAS = True
+# years) or for the towers' facades alone (False: they reach tower_era only, as "_osm_year"; era() keeps 3DBAG's).
+# Towers only for now (the user's go on the dataset, 2026-11-14): the other era rules were written for OSM's years but
+# have only seen 3DBAG's Dutch ones; widen it once they are checked against dated buildings elsewhere.
+OSM_YEARS_ALL_ERAS = False
 
 
 def tower_era(year):
