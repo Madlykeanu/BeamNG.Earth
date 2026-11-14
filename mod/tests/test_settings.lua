@@ -260,6 +260,13 @@ do  -- the 3D map open: no fixed distance (its view reaches as far as its eye), 
   scenetree.theLevelInfo.visibleDistance = 900000     -- (a globe view raised it meanwhile)
   settings.reapplyView()
   T.check(scenetree.theLevelInfo.visibleDistance == 1000, 'map closed: the fixed 1 km back, whatever was set meanwhile')
+  settings.set('viewDistanceKm', 100)                 -- (the default value, fixed)
+  active = true
+  settings.reapplyView()
+  scenetree.theLevelInfo.visibleDistance = 900000     -- (a globe view raised it)
+  active = false
+  settings.reapplyView()
+  T.check(scenetree.theLevelInfo.visibleDistance == 100000, 'map closed: a fixed 100 km (the default value) back too')
   beamngEarth_map3d = nil
   settings.set('viewDistanceKm', 200)
   post = post0                                        -- (the checks below count postApply calls from here)

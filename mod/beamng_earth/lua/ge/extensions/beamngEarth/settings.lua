@@ -473,7 +473,7 @@ function M.fixedViewM()
   return values.viewDistanceKm * 1000
 end
 
-local function applyViewDistance()
+local function applyViewDistance(force)
   local li = scenetree and scenetree.theLevelInfo
   local level = rawget(_G, 'getCurrentLevelIdentifier') and getCurrentLevelIdentifier()
   if not M.fixedViewM() then
@@ -489,8 +489,9 @@ local function applyViewDistance()
     return
   end
   local m = M.fixedViewM()
-  if not li or level ~= M.LEVEL_ID or appliedView == m then return end
-  if appliedView == nil and m == M.SCHEMA.viewDistanceKm.default * 1000 then return end
+  if not li or level ~= M.LEVEL_ID or (appliedView == m and not force) then return end
+  -- (the default untouched at a level's start; force: the 3D map closed, a globe view may have raised it)
+  if not force and appliedView == nil and m == M.SCHEMA.viewDistanceKm.default * 1000 then return end
   li.visibleDistance = m
   if li.postApply then li:postApply() end
   appliedView = m
@@ -499,8 +500,7 @@ end
 -- The 3D map opened or closed (core's onUpdate): the view distance as fixedViewM says now (a globe view may have raised
 -- it meanwhile: set again whatever it was).
 function M.reapplyView()
-  if M.fixedViewM() then appliedView = nil end
-  applyViewDistance()
+  applyViewDistance(M.fixedViewM() ~= nil)
 end
 
 -- The server's graphics knobs now ({ lodScale, lodPx, treeScale, buildingScale, photoPx, viewM }: core.sendGraphics). photoPx: the

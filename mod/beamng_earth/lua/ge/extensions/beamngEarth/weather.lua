@@ -690,11 +690,15 @@ local function apply(e)
     if not have or have ~= 0 then envCall(e.setFogDensity, 0) end
   elseif S.groundZ then
     local want = M.fogDensityFor(c.fogSigma, S.groundZ, c.fogHeight) * M.fogAltitudeShare(camH)
-    if not (m3 and m3.isActive and m3.isActive()) then      -- (driving only)
-      want = math.max(want, M.viewFogFloor(nil, S.groundZ, c.fogHeight))
-    end
+    local floor = (m3 and m3.isActive and m3.isActive()) and 0 or M.viewFogFloor(nil, S.groundZ, c.fogHeight)
     local have = e.getFogDensity and tonumber((e.getFogDensity()))
-    if not have or math.abs(have - want) > 0.02 * want then envCall(e.setFogDensity, want) end
+    if floor > want then        -- (a fixed view distance's fog: owned, the weather's own density its base: viewFog)
+      if not have or math.abs(have - floor) > 0.02 * floor then envCall(e.setFogDensity, floor) end
+      S.viewFogBase, S.viewFogSet = want, (e.getFogDensity and tonumber((e.getFogDensity()))) or floor
+    else
+      S.viewFogBase, S.viewFogSet = nil, nil
+      if not have or math.abs(have - want) > 0.02 * want then envCall(e.setFogDensity, want) end
+    end
     setIf(e.getFogAtmosphereHeight, e.setFogAtmosphereHeight, c.fogHeight, 1)
   end
   local sk = sky()
@@ -808,18 +812,28 @@ viewFog = function(e, mapOn)
   if not (e.getFogDensity and e.setFogDensity) then return end
   local have = tonumber((e.getFogDensity()))
   if not have then return end
-  if S.viewFogSet and math.abs(have - S.viewFogSet) > 1e-9 then S.viewFogBase, S.viewFogSet = nil, nil end
+  -- (owned: the density now is the one written for the floor, by here or by apply; anything else set the fog since)
+  if S.viewFogSet and math.abs(have - S.viewFogSet) > 1e-9 * math.max(1, have) then S.viewFogBase, S.viewFogSet = nil, nil end
   local h = e.getFogAtmosphereHeight and tonumber((e.getFogAtmosphereHeight())) or nil
   local floor = mapOn and 0 or M.viewFogFloor(nil, S.groundZ, h)
-  if floor > 0 and have < floor * 0.98 then
-    if S.viewFogBase == nil then S.viewFogBase = have end
-    envCall(e.setFogDensity, floor)
-    S.viewFogSet = floor
-  elseif floor == 0 and S.viewFogBase ~= nil then
-    envCall(e.setFogDensity, S.viewFogBase)
-    S.viewFogBase, S.viewFogSet = nil, nil
+  local base = S.viewFogBase
+  if base == nil then
+    if floor > 0 and have < floor * 0.98 then base = have else return end    -- (not owned and nothing to raise)
+  end
+  local target = math.max(base, floor)          -- (up or down with the floor; the base again when it goes)
+  if math.abs(have - target) > 1e-9 * math.max(1, target) then envCall(e.setFogDensity, target) end
+  if floor > base then
+    S.viewFogBase, S.viewFogSet = base, tonumber((e.getFogDensity())) or target
+  else
+    S.viewFogBase, S.viewFogSet = nil, nil      -- (released: the base is the fog again)
   end
 end
+
+M._viewFog = function(e, mapOn, groundZ)       -- tests (groundZ: the ground under the car)
+  if groundZ ~= nil then S.groundZ = groundZ end
+  viewFog(e, mapOn)
+end
+M._viewFogOwned = function() return S.viewFogBase, S.viewFogSet end    -- tests
 
 local function update(dt)
   if not S.inOurLevel or not scenetree.MissionGroup then return end
