@@ -16,13 +16,19 @@ use std::io::Read;
 pub const MAGIC: &[u8; 4] = b"OBY1";
 pub const YEAR_BASE: i64 = 1900;
 const MAX_BLOB: usize = 64 << 20; // a tile inflated (or plain) at most (a dense European z12 tile is ~1 MB)
-const MAX_STORED: usize = 16 << 20; // a tile as stored at most (oby_decode refuses a longer one before copying it)
+pub const MAX_STORED: usize = 16 << 20; // a tile as stored at most (oby_decode refuses a longer one before copying it)
 
 fn inflate(raw: &[u8]) -> Result<Vec<u8>, String> {
+    inflate_magic(raw, MAGIC)
+}
+
+/// A tile's bytes as stored (raw deflate, or plain when it starts with magic) inflated, both capped (buildcolours'
+/// tiles too).
+pub fn inflate_magic(raw: &[u8], magic: &[u8]) -> Result<Vec<u8>, String> {
     if raw.len() > MAX_STORED {
         return Err(format!("tile of {} bytes stored, past {MAX_STORED}", raw.len()));
     }
-    if raw.starts_with(MAGIC) {
+    if raw.starts_with(magic) {
         if raw.len() > MAX_BLOB {
             return Err(format!("plain tile past {MAX_BLOB} bytes"));
         }

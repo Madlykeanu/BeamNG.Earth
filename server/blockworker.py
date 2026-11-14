@@ -1206,15 +1206,16 @@ def _roads_tile_cached(aid, lat, lon, zoom, tx, ty, out_dir, vfs_dir, sidewalks,
 
 
 def _md_versions(buildings=False):
-    """The map data's versions (revisit keys); buildings: with the OSM building years' identity too (the tiles that
-    draw buildings: osmyears.identity, MapData.versions(buildings=True))."""
+    """The map data's versions (revisit keys); buildings: with the OSM building years' and colours' identities too (the
+    tiles that draw buildings: osmyears.identity, osmcolours.identity, MapData.versions(buildings=True))."""
     md = _s.md
     if md is None:
         return None
     if not buildings:
         return md.versions()
+    import osmcolours
     import osmyears
-    return dict(md.versions(), osmyears=osmyears.identity(md))
+    return dict(md.versions(), osmyears=osmyears.identity(md), osmcolours=osmcolours.identity(md))
 
 
 def _nyc_key(frame, box, cache_dir=None):

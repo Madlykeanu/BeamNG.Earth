@@ -25,6 +25,7 @@ import dnp
 import landmarks
 import mapgeom
 import nycmassing
+import osmcolours
 import osmyears
 import ships
 import staging
@@ -4660,10 +4661,11 @@ class _PartsOf:
     (converting every part for every tile was half of tile_buildings' time in Manhattan, 2026-10-24). A part in two
     cells' layers is taken once (the first)."""
 
-    def __init__(self, frame, part_layers):
+    def __init__(self, frame, part_layers, colours=None):
         self.frame = frame
         self.layers = [f for f in part_layers if f is not None and len(f.kind)]
         self.memo = {}
+        self.colours = colours      # (osmcolours.Index: OSM's colours where the part's Overture ones are empty)
 
     def _part(self, f, i):
         pp = f.parts(i)
@@ -4678,6 +4680,8 @@ class _PartsOf:
         # (and its roof height, materials and roof direction where the layer has them: a part's own roof height was read
         # and dropped, research 2026-11-10)
         own = {k: (a[k][i] if k in a else None) for k in PART_OWN}
+        if self.colours is not None and "src_record" in a:
+            own = self.colours.fill(own, a["src_record"][i])
         return np.stack([e, n], 1), _part_heights(a, i), own
 
     def get(self, bid, default=None):
@@ -5038,7 +5042,8 @@ def tile_buildings(frame, x0, y0, x1, y1, layers, elev, water=None, part_layers=
                    tunnels_xy=None, garages_xy=None, supports=None, bridges_xy=None, water_xy=None, decks=None,
                    ml_roads_xy=None, ways_xy=None, skip=frozenset(), min_size=None, own=None, house_land_layers=(),
                    passage_xy=None, rails_xy=None, roofs=None, photo=None, bag3d=None, tanks=None,
-                   industrial=None, parts_min_top=None, nyc=None, carriageways=None, clear_stats=None, years=None):
+                   industrial=None, parts_min_top=None, nyc=None, carriageways=None, clear_stats=None, years=None,
+                   colours=None):
     """[(Spec, gmin, gmax)] of the buildings whose footprint centroid is in the tile [x0, x1) x [y0, y1) (own: the
     tile's box when it says which points are its own, roads.box_owns: a geotile's)
     (anchor frame), rings relative to (x0, y0). layers: mapgeom.Features of buildings (one per map cell; a
@@ -5055,10 +5060,13 @@ def tile_buildings(frame, x0, y0, x1, y1, layers, elev, water=None, part_layers=
     nyc: nycmassing.Fetch, New York's measured massing: a building without parts of its own that matches a record
     takes the record's parts (its setbacks), drawn as the map's parts are. carriageways: carriageway_segments' roads,
     the footprints kept off them (road_clearance; clear_stats its counts). years: osmyears.Fetch, OSM's construction
-    years by way (a building's _year, its parts' too: era, tower_era)."""
-    parts_of = _PartsOf(frame, part_layers)     # building id -> [(ring in the anchor frame, (own height, bottom))]
-    nyc_idx = nyc.index() if nyc is not None else None
+    years by way (a building's _year, its parts' too: era, tower_era). colours: osmcolours.Fetch, OSM's colours by way
+    or relation, a building's or a part's facade_color / roof_color where Overture's is empty."""
     year_idx = years.years() if years is not None else None
+    col_idx = osmcolours.Index(colours.colours()) if colours is not None else None
+    # building id -> [(ring in the anchor frame, (own height, bottom), own attrs)]
+    parts_of = _PartsOf(frame, part_layers, col_idx if col_idx is not None and col_idx.c is not None else None)
+    nyc_idx = nyc.index() if nyc is not None else None
     seen = set()
     turbines = None                             # (turbine_points, looked up at the first building)
     # the decks' and the tunnels' floors at their heights (decks): a building such a floor runs through gets its way at
@@ -5093,6 +5101,9 @@ def tile_buildings(frame, x0, y0, x1, y1, layers, elev, water=None, part_layers=
         # (OSM's construction years of the rows' ways: osmyears.py)
         row_years = dict(zip(rows, osmyears.lookup(year_idx, [a["src_record"][i] for i in rows]).tolist())) \
             if year_idx is not None and a.get("src_record") is not None else None
+        # (and OSM's colours where Overture dropped them: osmcolours.py)
+        row_cols = dict(zip(rows, col_idx.lookup([a["src_record"][i] for i in rows]))) \
+            if col_idx is not None and col_idx.c is not None and a.get("src_record") is not None else None
         for i in rows:
             if a.get("is_underground") is not None and bool(a["is_underground"][i]):
                 continue
@@ -5132,6 +5143,8 @@ def tile_buildings(frame, x0, y0, x1, y1, layers, elev, water=None, part_layers=
                   ("class", "subtype", "height", "num_floors", "min_height", "roof_shape", "roof_height", "name",
                    "facade_material", "facade_color", "roof_material", "roof_color", "roof_orientation",
                    "roof_direction", "height_src", "roof_rise")}
+            if row_cols is not None and row_cols[i] != (None, None):
+                at = osmcolours.fill_from(at, row_cols[i])
             if key is not None:         # (plan's random choices keyed on the feature, not where the anchor puts it)
                 at["seed_id"] = str(key)
             if row_years is not None and row_years.get(i):
@@ -6473,6 +6486,7 @@ def road_tile_items(
     bag3d = threedbag.Fetch(frame, x0, y0, x1, y1, getattr(md, "cache_dir", None))   # (the Dutch roofs, likewise)
     nyc = nycmassing.Fetch(frame, x0, y0, x1, y1, getattr(md, "cache_dir", None))   # (New York's setbacks, likewise)
     years = osmyears.Fetch(frame, x0, y0, x1, y1, md)   # (OSM's construction years, likewise)
+    colours = osmcolours.Fetch(frame, x0, y0, x1, y1, md)   # (OSM's colours Overture dropped, likewise)
     house_layers = ("land_use",) if francehouses.needs_residential_land(frame, box) else ()
     keys = roads.cells_of_tile(frame, tx, ty, margin=0.0)
     measured_wait(md, keys)
@@ -6499,6 +6513,7 @@ def road_tile_items(
         bag3d=bag3d,
         nyc=nyc,
         years=years,
+        colours=colours,
         west_town=district_town(frame, tx, ty, md),
         roads_xy=road_lines(frame, [c.layers.get("roads") for c in cds], x0, y0),
         passage_xy=road_lines(frame, [c.layers.get("roads") for c in cds], x0, y0,
@@ -7009,11 +7024,13 @@ def far_items(frame, tile, ty, md, ground, lamp_region=None, urban_fn=None, widt
     keys, layers = far_needs(frame, tile, ty)
     nyc = nycmassing.Fetch(frame, x0, y0, x1, y1, getattr(md, "cache_dir", None))   # (New York's setbacks)
     years = osmyears.Fetch(frame, x0, y0, x1, y1, md)   # (OSM's construction years)
+    colours = osmcolours.Fetch(frame, x0, y0, x1, y1, md)   # (OSM's colours Overture dropped)
     measured_wait(md, keys)
     import mapcells
     cds = mapcells.load_cells(md, keys, layers)
     items = tile_buildings(frame, x0, y0, x1, y1, [c.layers.get("buildings") for c in cds], ground, own=own,
                            part_layers=[c.layers.get("building_parts") for c in cds], nyc=nyc, years=years,
+                           colours=colours,
                            house_land_layers=[c.layers.get("land_use") for c in cds],
                            roofs=measured_roofs(md, frame, x0, y0, x1, y1),
                            west_town=district_town(frame, tile, ty, md),
@@ -7335,12 +7352,13 @@ def sky_items(frame, box, keys, md, ground, lamp_region=None, own=None):
         md.warm([(k, layer) for k in keys for layer in sky_layers], kind="prefetch")
         return None
     years = osmyears.Fetch(frame, x0, y0, x1, y1, md)   # (OSM's construction years: the towers' facades by era)
+    colours = osmcolours.Fetch(frame, x0, y0, x1, y1, md)   # (OSM's colours Overture dropped: the towers' tops)
     measured_wait(md, keys, wait=False)
     cds = [md.cell(k, layers=sky_layers, kind="background") for k in keys]
     layers = [c.layers.get("buildings") for c in cds]
     items = tile_buildings(frame, x0, y0, x1, y1, layers, ground, min_size=(SKY_SLENDER_H, SKY_MIN_AREA_M2), own=own,
                            part_layers=[c.layers.get("building_parts") for c in cds] if SKY_PARTS else (),
-                           parts_min_top=SKY_PARTS_MIN_M, years=years)
+                           parts_min_top=SKY_PARTS_MIN_M, years=years, colours=colours)
     size = max(x1 - x0, y1 - y0)
     lamps = far_lamps(frame, [c.layers.get("roads") for c in cds], x0, y0, size,
                       built_squares(items, 0.0, 0.0, size), ground, lamp_region, own=own)
