@@ -160,4 +160,95 @@ T.check(P.offSpot({ x = 100, y = 0 }, nil, P0) and P.offSpot({ x = 100, y = 0 },
   'far, no spot (or another frame\'s): moved')
 T.check(not P.offSpot({ x = 100, y = 0 }, { pos = { x = 101, y = 1 } }, P0), 'on its spot: stays')
 T.check(P.offSpot({ x = 100, y = 0 }, { pos = { x = 110, y = 0 } }, P0), 'off its spot: moved')
+
+-- left behind: far in any direction, or HIDE_BEHIND_M behind a moving player only
+local mv = { x = 0, y = 0, vx = 20, vy = 0 }
+T.check(P.leftBehind({ x = -200, y = 0 }, mv) and not P.leftBehind({ x = 200, y = 0 }, mv),
+  'behind a moving player: left behind; the same distance ahead: not')
+T.check(not P.leftBehind({ x = -100, y = 0 }, mv), 'just behind (under HIDE_BEHIND_M): not')
+T.check(not P.leftBehind({ x = -200, y = 0 }, P0) and P.leftBehind({ x = 700, y = 0 }, P0),
+  'standing: only HIDE_M away counts')
+T.check(P.moving(mv) and not P.moving(P0) and not P.moving({ x = 0, y = 0, vx = 1, vy = 1 }), 'moving: HIDE_MIN_SPEED')
+
+-- a moving player: the sites rebuilt every REBUILD_MOVE_M, not every REBUILD_S
+P.reset()
+active, given = true, nil
+P.onRows(6, '6:0_0', rows(30, 0, 10))
+clock = clock + 3
+P.update(6, { x = 0, y = 0, z = 0, vx = 20, vy = 0 })
+T.check(given and #given.parkingSpots.sorted == 30, 'moving: first build at once')
+P.onRows(6, '6:1_0', rows(3, 300, 10))
+clock = clock + 3
+P.update(6, { x = 50, y = 0, z = 0, vx = 20, vy = 0 })
+T.check(#given.parkingSpots.sorted == 30, 'moving 50 m: not rebuilt yet')
+clock = clock + 3
+P.update(6, { x = 120, y = 0, z = 0, vx = 20, vy = 0 })
+T.check(#given.parkingSpots.sorted == 33, 'moving 120 m: rebuilt')
+P.onRows(6, '6:2_0', rows(2, 400, 10))
+P.update(6, { x = 130, y = 0, z = 0, vx = 20, vy = 0 }, { -2000, -2000, 2000, 2000 })
+clock = clock + 3
+P.update(6, { x = 140, y = 0, z = 0, vx = 20, vy = 0 }, { -2000, -2000, 2000, 2000 })
+T.check(#given.parkingSpots.sorted == 35, 'a new block: rebuilt at once')
+
+-- the guard: a car left behind goes inactive; the stock pool taking it back clears it; with every car hidden one
+-- comes back on a free spot UNHIDE_MIN_M .. START_M away; the quality preset caps the active amount
+local cars = {}
+local function car(id, x, y)
+  local c = { id = id, pos = { x = x, y = y, z = 0 }, active = 1 }
+  function c:getPosition() return self.pos end
+  function c:getVelocity() return { x = 0, y = 0, z = 0 } end
+  function c:getActive() return self.active == 1 end
+  function c:setActive(a) self.active = a end
+  cars[id] = c
+  return c
+end
+function getObjectByID(id) return cars[id] end
+local teleported, amountSet, vars = {}, nil, { activeAmount = math.huge }
+gameplay_parking.getParkedCarsList = function() return { 11, 12 } end
+gameplay_parking.getParkedCarsData = function() return {} end
+gameplay_parking.forceTeleport = function(id, pos, minD, maxD) teleported[#teleported + 1] = { id, minD, maxD } end
+gameplay_parking.getParkingVars = function() return vars end
+gameplay_parking.setActiveAmount = function(n) amountSet, vars.activeAmount = n, n end
+package.loaded['beamngEarth/settings'] = { get = function(k) return k == 'quality' and 'high' or nil end }
+car(11, 100, 10)    -- ahead
+car(12, -250, 10)   -- left behind
+clock = clock + 1
+P.update(6, { x = 0, y = 0, z = 0, vx = 20, vy = 0 }, { -2000, -2000, 2000, 2000 })
+T.check(cars[11].active == 1 and cars[12].active == 0, 'the car left behind goes inactive, the one ahead stays')
+T.check(amountSet == nil, 'quality high: no cap')
+clock = clock + 1
+P.update(6, { x = 0, y = 0, z = 0, vx = 20, vy = 0 }, { -2000, -2000, 2000, 2000 })
+T.check(cars[12].active == 0 and #teleported == 0, 'another parked car is out: the hidden one waits for the stock pool')
+cars[12].active, cars[12].pos = 1, { x = 300, y = 10, z = 0 }    -- the stock pool moved it to a spot ahead
+clock = clock + 1
+P.update(6, { x = 0, y = 0, z = 0, vx = 20, vy = 0 }, { -2000, -2000, 2000, 2000 })
+T.check(cars[12].active == 1, 'taken back by the stock pool: active')
+cars[11].pos, cars[12].pos = { x = -300, y = 10, z = 0 }, { x = -320, y = 10, z = 0 }
+clock = clock + 1
+P.update(6, { x = 0, y = 0, z = 0, vx = 20, vy = 0 }, { -2000, -2000, 2000, 2000 })
+T.check(cars[11].active == 0 and cars[12].active == 1, 'a car that just came back stays HIDE_HOLD_S')
+clock = clock + P.HIDE_HOLD_S
+P.update(6, { x = 0, y = 0, z = 0, vx = 20, vy = 0 }, { -2000, -2000, 2000, 2000 })
+T.check(cars[12].active == 0, 'every car hidden')
+clock = clock + 1
+P.update(6, { x = 0, y = 0, z = 0, vx = 20, vy = 0 }, { -2000, -2000, 2000, 2000 })
+T.check(#teleported == 1 and teleported[1][2] == P.UNHIDE_MIN_M and teleported[1][3] == P.START_M,
+  'none out: one back on a free spot UNHIDE_MIN_M .. START_M away')
+local back = (cars[11].active == 1 and 1 or 0) + (cars[12].active == 1 and 1 or 0)
+T.check(back == 1, 'one at a time')
+package.loaded['beamngEarth/settings'] = { get = function(k) return k == 'quality' and 'medium' or nil end }
+clock = clock + 1
+P.update(6, { x = 0, y = 0, z = 0, vx = 20, vy = 0 }, { -2000, -2000, 2000, 2000 })
+T.check(amountSet == P.ACTIVE_CAP.medium, 'quality medium: the active amount capped')
+vars.activeAmount = 1
+amountSet = nil
+clock = clock + 1
+P.update(6, { x = 0, y = 0, z = 0, vx = 20, vy = 0 }, { -2000, -2000, 2000, 2000 })
+T.check(amountSet == nil, 'a lower amount of the player\'s own stays')
+vars.activeAmount = P.ACTIVE_CAP.medium
+package.loaded['beamngEarth/settings'] = { get = function(k) return k == 'quality' and 'ultra' or nil end }
+clock = clock + 1
+P.update(6, { x = 0, y = 0, z = 0, vx = 20, vy = 0 }, { -2000, -2000, 2000, 2000 })
+T.check(amountSet == math.huge, 'a higher preset: the player\'s amount back')
+P.reset()
 T.done('test_parking')

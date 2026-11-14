@@ -34,6 +34,24 @@ M.GUARD_S = 0.5
 M.FALL_MS = -12         -- a parked car falling faster than this (m/s) is off the ground: moved too
 M.OFF_SPOT_M = 4        -- ... and one this far from its spot (none, or another frame's) ...
 M.OFF_SPOT_FAR_M = 60   -- ... once the player is this far from it (a car the player pushed stays in view)
+-- Every active parked car costs frame time even when it sleeps: the engine's physics frame waits for each vehicle,
+-- and while the world server streams (driving) those waits grow. Steam Deck, Des Moines at 45 mph, the player's 5
+-- parked cars: PhysicsAndVLUA 0.7 -> 5.1 ms a frame, 26.8 -> 24.4 fps; standing still with the CPU busy, 5 cars 13 ms,
+-- 2 cars 3 ms, none 0.2 (2026-11-14; the cars' own vehicle Lua steps were not the cost). So:
+-- - a parked car the stock system left behind (no free spot ahead for it: a highway, open country) goes inactive
+--   (hidden) once it is HIDE_BEHIND_M behind a moving player, or HIDE_M away in any direction; the stock pool uses
+--   inactive cars first for its next spot ahead, and with every car hidden one comes back on a free spot
+--   UNHIDE_MIN_M .. START_M from the player (never in front of the camera's nose);
+-- - the low quality presets keep fewer of the player's parked cars active at once (ACTIVE_CAP, the stock pool's
+--   activeAmount: the rest wait pooled and take turns on the spots ahead).
+-- Deck A/B (ABBA, same route, the player's 5 cars, medium): physics 4.1 -> 1.6 ms a frame, 23.4 -> 24.5 fps, frames
+-- over 50 ms 1297 -> 1124, physics-led slow frames 283 -> 42 a drive (parked cars off: 27.5 fps, 0.3 ms).
+M.HIDE_M = 600          -- (the stock system places cars up to ~400 m ahead: searchPointDist + searchRadius)
+M.HIDE_BEHIND_M = 150   -- (it moves a car behind the player on after ~70 m: 50 m + the speed)
+M.HIDE_MIN_SPEED = 3    -- m/s: slower, no direction (HIDE_M only)
+M.UNHIDE_MIN_M = 120    -- (the stock keepClearRadius: parked cars avoid appearing nearer)
+M.HIDE_HOLD_S = 10      -- a car that came back stays at least this long before it can hide again
+M.ACTIVE_CAP = { low = 2, medium = 2 }   -- (Deck drive: 5 active 5.1 ms, 3: 4.2, 2: 3.0, none 0.7)
 M.enabled = true
 
 local spots = {}        -- tile key -> { anchor, rows }
@@ -212,30 +230,83 @@ end
 -- teleport to any road of the graph, in view, and the guard moved it again half a second later: 16 cars flickered
 -- about in the distance, ~30 moves a second (the user's session 2026-10-15, Arizona). Those cars wait hidden instead
 -- and come back once spots are near (M.freeNear).
-local hidden = {}       -- parked car id -> true while it waits hidden for a spot
-function M.freeNear(player, rad)
+local hidden = {}       -- parked car id -> 'stranded' (no free spot for it) or 'behind' (left behind) while hidden
+local backAt = {}       -- parked car id -> os.clock() it came back (HIDE_HOLD_S)
+-- Free spots within rad (START_M) of the player, at least minRad (0) from it.
+function M.freeNear(player, rad, minRad)
   local n = 0
-  local r2 = (rad or M.START_M) ^ 2
+  local r2, m2 = (rad or M.START_M) ^ 2, (minRad or 0) ^ 2
   for _, ps in pairs(objs) do
     local p = ps.pos
-    if p and not ps.vehicle and (p.x - player.x) ^ 2 + (p.y - player.y) ^ 2 < r2 then n = n + 1 end
+    if p and not ps.vehicle then
+      local d2 = (p.x - player.x) ^ 2 + (p.y - player.y) ^ 2
+      if d2 < r2 and d2 >= m2 then n = n + 1 end
+    end
   end
   return n
+end
+
+-- Pure: a parked car at p left behind by the stock system: HIDE_M from the player pp, or HIDE_BEHIND_M behind it
+-- while it moves (pp.vx, pp.vy at least HIDE_MIN_SPEED).
+function M.leftBehind(p, pp)
+  local dx, dy = p.x - pp.x, p.y - pp.y
+  local d2 = dx * dx + dy * dy
+  if d2 > M.HIDE_M * M.HIDE_M then return true end
+  if not M.moving(pp) or d2 < M.HIDE_BEHIND_M * M.HIDE_BEHIND_M then return false end
+  return dx * (pp.vx or 0) + dy * (pp.vy or 0) < 0
+end
+
+-- Pure: the player moves (HIDE_MIN_SPEED or faster).
+function M.moving(pp)
+  local vx, vy = pp.vx or 0, pp.vy or 0
+  return vx * vx + vy * vy >= M.HIDE_MIN_SPEED * M.HIDE_MIN_SPEED
+end
+
+-- The quality preset's cap on active parked cars (nil: the player's amount as it is).
+function M.activeCap()
+  local ok, s = pcall(require, 'beamngEarth/settings')
+  local q = ok and type(s) == 'table' and s.get and s.get('quality')
+  return q and M.ACTIVE_CAP[q] or nil
+end
+local capped = nil      -- the stock activeAmount before our cap lowered it
+local function applyCap(gp)
+  if heldActive or not (gp.getParkingVars and gp.setActiveAmount) then return end
+  local cap = M.activeCap()
+  local cur = tonumber((gp.getParkingVars() or {}).activeAmount)
+  if cap and cur and cur > cap then
+    capped = capped or cur
+    pcall(gp.setActiveAmount, cap)
+  elseif not cap and capped then
+    pcall(gp.setActiveAmount, capped)
+    capped = nil
+  end
 end
 
 local function guard(player)
   local gp = gameplay_parking
   if not box or not gp or not gp.getState() then return end
+  applyCap(gp)
+  local now = os.clock()
   local data = (not scatterPending and sites and gp.getParkedCarsData) and gp.getParkedCarsData() or nil
-  local free = M.freeNear(player)
-  for _, id in ipairs(gp.getParkedCarsList() or {}) do
+  local free = M.freeNear(player, M.START_M, M.UNHIDE_MIN_M)
+  local list = gp.getParkedCarsList() or {}
+  local anyActive = false
+  for _, id in ipairs(list) do
+    local o = getObjectByID(id)
+    if o and not hidden[id] and o:getActive() then anyActive = true break end
+  end
+  local here = vec3(player.x, player.y, player.z)
+  for _, id in ipairs(list) do
     local o = getObjectByID(id)
     if o and hidden[id] then
-      if free > 0 then                     -- spots near again: back, onto one of them
-        hidden[id] = nil
+      if o:getActive() then                -- the stock pool took it for a spot ahead: back
+        hidden[id], backAt[id] = nil, now
+      elseif free > 0 and (hidden[id] == 'stranded' or not anyActive) then
+        -- spots near again (for a car left behind: only with no parked car out, else the stock pool brings it)
+        hidden[id], backAt[id] = nil, now
         o:setActive(1)
-        pcall(gp.forceTeleport, id, vec3(player.x, player.y, player.z), 0, M.START_M)
-        free = free - 1
+        pcall(gp.forceTeleport, id, here, M.UNHIDE_MIN_M, M.START_M)
+        free, anyActive = free - 1, true
       end
     elseif o and o:getActive() then
       local p = o:getPosition()
@@ -244,12 +315,15 @@ local function guard(player)
       local off = d and M.offSpot(p, d.parkingSpotId and sites.parkingSpots.objects[d.parkingSpotId], player)
       if falling or off or not M.inside(box, p.x, p.y, M.GUARD_M) then
         if free > 0 then
-          pcall(gp.forceTeleport, id, vec3(player.x, player.y, player.z), 0, M.START_M)
+          pcall(gp.forceTeleport, id, here, M.UNHIDE_MIN_M, M.START_M)
           free = free - 1
         else
-          hidden[id] = true
+          hidden[id] = 'stranded'
           o:setActive(0)
         end
+      elseif now - (backAt[id] or -math.huge) >= M.HIDE_HOLD_S and M.leftBehind(p, player) then
+        hidden[id] = 'behind'
+        o:setActive(0)
       end
     end
   end
@@ -278,7 +352,13 @@ end
 -- A rebuild waits for a light frame (governor roomFor, as navgraph's applies), REBUILD_WAIT_FRAMES at most
 M.REBUILD_ROOM_MS = 4.0
 M.REBUILD_WAIT_FRAMES = 30
+-- While the player moves, a rebuild also waits until it is REBUILD_MOVE_M from the last one (driving, new tiles make
+-- the sites dirty all the time: a rebuild every REBUILD_S cost 5-59 ms frames on a Steam Deck, 33 a 6.6 km drive);
+-- the stock search looks at most ~400 m ahead, KEEP_M covers it with this margin. A new anchor, block or scatter
+-- rebuilds at once.
+M.REBUILD_MOVE_M = 100
 local waited = 0
+local builtAt = nil     -- the player's {x, y} at the last rebuild; nil: the next one is due at once
 
 function M.update(aid, player, blk, gov)
   if aid ~= anchorId then
@@ -286,10 +366,12 @@ function M.update(aid, player, blk, gov)
     objs = {}
     dirty = true
     newAnchor = true
+    builtAt = nil
   end
   if blk and (not box or blk[1] ~= box[1] or blk[2] ~= box[2]) then
     box = { blk[1], blk[2], blk[3], blk[4] }
     dirty = true
+    builtAt = nil
   end
   if player and os.clock() - lastGuard >= M.GUARD_S then
     lastGuard = os.clock()
@@ -307,12 +389,16 @@ function M.update(aid, player, blk, gov)
   local off = not gpOn and (started or not require('beamngEarth/navgraph').choice.parked)
   local t = os.clock()
   if t - lastBuild < (off and M.REBUILD_OFF_S or M.REBUILD_S) then return end
+  if builtAt and started and not scatterPending and M.moving(player)
+      and (player.x - builtAt[1]) ^ 2 + (player.y - builtAt[2]) ^ 2 < M.REBUILD_MOVE_M * M.REBUILD_MOVE_M then
+    return
+  end
   if gov and gov.roomFor and waited < M.REBUILD_WAIT_FRAMES and not gov:roomFor(M.REBUILD_ROOM_MS) then
     waited = waited + 1
     return
   end
   waited = 0
-  lastBuild, dirty = t, false
+  lastBuild, dirty, builtAt = t, false, { player.x, player.y }
   local sw = stopwatch.new()
   local ok, near, mappedNear = pcall(rebuild, player)
   if gov and gov.noteFrame then gov:noteFrame(sw()) end
@@ -358,7 +444,7 @@ end
 function M.reset()
   require('beamngEarth/busparked').reset()
   spots, objs, anchorId, dirty, lastBuild, sites = {}, {}, nil, false, -math.huge, nil
-  hidden = {}
+  hidden, backAt, capped, builtAt = {}, {}, nil, nil
   box, lastGuard, heldActive = nil, -math.huge, nil
   started, scatterPending = false, false
   lastPlayer = nil
