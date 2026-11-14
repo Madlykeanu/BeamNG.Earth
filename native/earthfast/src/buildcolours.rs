@@ -8,7 +8,10 @@
 //! (starting with the magic). Bytes after the roof indices are left for later sections.
 //!
 //! The tiles come from the network: every count is checked against the bytes left, every index against the palette,
-//! the inflated size is capped (buildyears' MAX_BLOB), and a bad tile is an error, never a panic.
+//! the inflated size is capped (buildyears' MAX_BLOB), the rows (buildyears' MAX_ROWS) and what they and the palette
+//! decode to (MAX_DECODED) are bounded before anything is allocated for them, a row with neither colour is refused,
+//! and a bad tile is an error, never a panic (Codex review of 9f1bcf84: a 62 KB deflated tile of 32 M rows of one-byte
+//! deltas and no colours passed every check and asked for 512 MB). Manhattan's densest z12 tile has 9,514 rows.
 
 use numpy::IntoPyArray;
 use pyo3::exceptions::PyValueError;
@@ -19,6 +22,8 @@ use crate::buildyears;
 pub const MAGIC: &[u8; 4] = b"OBC1";
 const FACADE: u8 = 1;
 const ROOF: u8 = 2;
+const ROW_BYTES: u64 = 8 + 4 + 4; // a row decoded: its key, facade and roof
+const PAL_BYTES: u64 = 4; // a palette colour decoded
 
 struct R<'a> {
     b: &'a [u8],
@@ -66,8 +71,11 @@ pub fn parse(raw: &[u8]) -> Result<(Vec<u64>, Vec<i32>, Vec<i32>), String> {
     }
     let mut r = R { b: &b, i: MAGIC.len() };
     let n = r.uv()?;
-    // (each row: a key delta byte and a flag byte at least)
-    if n > (r.left() / 2) as u64 {
+    if n > buildyears::MAX_ROWS || n.saturating_mul(ROW_BYTES) > buildyears::MAX_DECODED {
+        return Err(format!("{n} rows, past the {} a tile may have", buildyears::MAX_ROWS));
+    }
+    // (each row: a key delta byte, a flag byte and a palette index byte at least)
+    if n > (r.left() / 3) as u64 {
         return Err(format!("{n} rows past the tile's {} bytes", r.left()));
     }
     let n = n as usize;
@@ -82,12 +90,14 @@ pub fn parse(raw: &[u8]) -> Result<(Vec<u64>, Vec<i32>, Vec<i32>), String> {
         keys.push(acc);
     }
     let flags = r.bytes(n)?;
-    if let Some(f) = flags.iter().find(|&&f| f & !(FACADE | ROOF) != 0) {
-        return Err(format!("unknown flags {f:#x}"));
+    if let Some(f) = flags.iter().find(|&&f| f & !(FACADE | ROOF) != 0 || f == 0) {
+        return Err(if *f == 0 { "a row with no colour".to_string() } else { format!("unknown flags {f:#x}") });
     }
     let m = r.uv()?;
-    if m > (r.left() / 3) as u64 || m > 1 << 24 {
-        return Err(format!("a palette of {m} past the tile's {} bytes", r.left()));
+    // (each colour used by a row at least: 2 a row at most)
+    let decoded = (n as u64 * ROW_BYTES).saturating_add(m.saturating_mul(PAL_BYTES));
+    if m > (r.left() / 3) as u64 || m > 2 * n as u64 || decoded > buildyears::MAX_DECODED {
+        return Err(format!("a palette of {m} past the tile's {} bytes or its {n} rows", r.left()));
     }
     let pal: Vec<i32> = r
         .bytes(3 * m as usize)?
@@ -205,6 +215,61 @@ mod tests {
         assert_eq!((k, f, r), (vec![4, 10], vec![0x123456, -1], vec![-1, 0x654321]));
         let (k, f, r) = parse(&blob(&[])).unwrap();
         assert!(k.is_empty() && f.is_empty() && r.is_empty());
+    }
+
+    fn deflate(b: &[u8]) -> Vec<u8> {
+        use flate2::write::DeflateEncoder;
+        use std::io::Write;
+        let mut e = DeflateEncoder::new(Vec::new(), flate2::Compression::best());
+        e.write_all(b).unwrap();
+        e.finish().unwrap()
+    }
+
+    #[test]
+    fn allocation_bombs_are_refused_before_allocating() {
+        // the review's bomb: 32 M rows of one-byte deltas, no colours, an empty palette (~62 KB deflated)
+        let n: usize = 32 << 20;
+        let mut big = MAGIC.to_vec();
+        uv(n as u64, &mut big);
+        big.resize(big.len() + n, 1);
+        big.resize(big.len() + n, 0);
+        uv(0, &mut big);
+        let z = deflate(&big);
+        drop(big);
+        assert!(z.len() < 200_000, "{}", z.len());
+        assert!(parse(&z).unwrap_err().contains("inflates past"));
+        // MAX_ROWS + 1 rows with the bytes for every row, inside MAX_BLOB: refused by the count
+        let rows = |n: usize| {
+            let mut b = MAGIC.to_vec();
+            uv(n as u64, &mut b);
+            b.resize(b.len() + n, 1); // (deltas)
+            b.resize(b.len() + n, FACADE);
+            uv(1, &mut b);
+            b.extend_from_slice(&[1, 2, 3]);
+            b.resize(b.len() + n, 0); // (palette indices)
+            b
+        };
+        let over = rows(buildyears::MAX_ROWS as usize + 1);
+        assert!(over.len() < buildyears::MAX_BLOB);
+        assert!(parse(&deflate(&over)).unwrap_err().contains("rows, past"));
+        let (k, f, r) = parse(&deflate(&rows(buildyears::MAX_ROWS as usize))).unwrap();
+        assert_eq!((k.len(), f[0], r[0]), (buildyears::MAX_ROWS as usize, 0x010203, -1), "MAX_ROWS decodes");
+        assert!(buildyears::MAX_ROWS * ROW_BYTES <= buildyears::MAX_DECODED);
+        // rows with neither colour
+        let mut b = MAGIC.to_vec();
+        uv(3, &mut b);
+        b.extend_from_slice(&[1, 1, 1, 0, 0, 0]);
+        uv(0, &mut b);
+        b.extend_from_slice(&[0, 0, 0]);
+        assert!(parse(&b).unwrap_err().contains("no colour"));
+        // a palette past twice the rows
+        let mut b = MAGIC.to_vec();
+        uv(1, &mut b);
+        b.extend_from_slice(&[1, FACADE]);
+        uv(3, &mut b);
+        b.extend_from_slice(&[0; 9]);
+        b.push(0);
+        assert!(parse(&b).unwrap_err().contains("palette of 3"));
     }
 
     #[test]
