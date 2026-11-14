@@ -60,8 +60,7 @@ function M.stop(mode)
   ai.setMode(mode or 'stop')
 end
 
--- A streamed-route hold can resume the same manoeuvre. User cancellation,
--- physical recovery and arrival still discard it through reset/stop/arrive.
+-- Keep temporary route waits separate from cancellation and physical recovery.
 function M.hold()
   resetPath()
   if beamngEarth_oncomingPass then beamngEarth_oncomingPass.suspend() end
@@ -143,6 +142,10 @@ function M.drive(ids, version, force, speed, aggression)
   lastPath = {}
   for i, id in ipairs(ids) do lastPath[i] = id end
   lastMap, lastVersion, lastSpeed, lastAggression = md, version, speed, aggression
+  if not beamngEarth_staticObstacles and extensions and extensions.load then
+    extensions.load('beamngEarth_staticObstacles')
+  end
+  if beamngEarth_staticObstacles then beamngEarth_staticObstacles.bindPath(lastPath,md,action=='start') end
   return action
 end
 

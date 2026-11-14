@@ -3784,12 +3784,12 @@ M.onClientStartMission = onClientStartMission
 M.onClientPreStartMission = onClientPreStartMission
 M.onNavgraphReloaded = function() navgraph.onReloaded() end
 M.onVehicleMapmgrUpdate = function(id)
-  gps.onVehicleMapmgrUpdate(id)
   local vehicle = st.inOurLevel and getObjectByID(id)
   if vehicle then vehicle:queueLuaCommand([[
     if not beamngEarth_oncomingClearance then extensions.load('beamngEarth_oncomingClearance') end; beamngEarth_oncomingClearance.bindMap()
     if not beamngEarth_maneuverClearance then extensions.load('beamngEarth_maneuverClearance') end; beamngEarth_maneuverClearance.bindMap()
   ]]) end
+  gps.onVehicleMapmgrUpdate(id)
 end
 M.onAiRouteDone = function(id) gps.onAiRouteDone(id) end
 M.onVehicleSwitched = function(oldId, newId, player)
