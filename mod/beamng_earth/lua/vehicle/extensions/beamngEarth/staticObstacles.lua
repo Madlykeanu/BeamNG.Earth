@@ -324,7 +324,21 @@ local path,bound,cursor,elapsed=nil,nil,1,0
 local policy,applied,lastCap,goal
 local phase,reason,detections,passes='idle',nil,0,0
 local lastProbe
+local signalResult
+local waitReported,waitElapsed=false,0
+
+local function reportSignalWait(waiting,dt)
+  waitElapsed=waitElapsed+(dt or 0)
+  if waiting~=waitReported or(waiting and waitElapsed>=.5)then
+    if obj and obj.getId and obj.queueGameEngineLua then
+      obj:queueGameEngineLua("require('beamngEarth/gps').onAiSignalWait("..obj:getId()..','..tostring(waiting)..')')
+    end
+    waitReported,waitElapsed=waiting,0
+  end
+end
+
 local function release()
+  reportSignalWait(false)
   if policy and ai and ai.routeSpeed==applied and ai.speedMode=='limit' then
     ai.setSpeed(policy.speed);ai.setSpeedMode(policy.mode)
   end
@@ -348,6 +362,7 @@ end
 function M.reset()
   release();path,bound,cursor,elapsed,goal=nil,nil,1,0,nil;phase,reason='idle',nil
   lastProbe=nil
+  signalResult=nil
 end
 M.onReset=M.reset
 function M.onExtensionUnloaded()
@@ -358,6 +373,7 @@ function M.onExtensionUnloaded()
 end
 
 function M.bindPath(ids,md,started)
+  if not beamngEarth_trafficSignals and extensions and extensions.load then extensions.load('beamngEarth_trafficSignals')end
   if md~=bound then M.reset();bound=md end
   local changed=not path or #path~=#ids
   if not changed then for i,id in ipairs(ids)do if path[i]~=id then changed=true;break end end end
@@ -429,6 +445,10 @@ local function probe()
   local hit=M.trace(c,nil,halfWidth,cast,surface)
   lastProbe.hit=hit and hit.distance
   local legal=bound.graph[a][b].speedLimit
+  if beamngEarth_trafficSignals then
+    signalResult=beamngEarth_trafficSignals.limit(c,bound,mapmgr.signalsData,speed)
+    if signalResult then signalResult.legal=legal end
+  end
   local ego={id=obj:getId(),width=width,length=length,height=obj:getInitialHeight(),surface=surface}
   if oncoming and oncoming.active() then
     return oncoming.update(M,bound,path,c,hit,ego,trafficObjects(),cast,speed,legal,a,b)
@@ -488,25 +508,30 @@ function M.updateGFX(dt)
     if ai and ai.mode~='manual' and beamngEarth_oncomingPass and not beamngEarth_oncomingPass.suspended() then
       beamngEarth_oncomingPass.reset()
     end
-    release();goal=nil;phase='idle';return
+    release();goal=nil;signalResult=nil;phase='idle';return
   end
   elapsed=elapsed+(dt or 0)
   if elapsed<M.SAMPLE_S then return end
+  local sampled=elapsed
   elapsed=0
+  signalResult=nil
   local ok,result=pcall(probe)
   if not ok then
-      reason=tostring(result);phase='unavailable'
+    reportSignalWait(false)
+    reason=tostring(result);phase='unavailable'
     if applied then limit(0) end
     return
   end
+  if signalResult and(not result or signalResult.cap<result.cap)then result=signalResult end
   if not result then release();phase,reason='idle',nil;return end
+  reportSignalWait(signalResult~=nil and signalResult.cap<.5 and obj:getVelocity():length()<.5,sampled)
   phase,reason=result.phase,result.reason
   limit(result.cap,result.legal)
 end
 
 function M.status()
   return {phase=phase,reason=reason,holding=applied~=nil,speedCap=applied,detections=detections,passes=passes,
-    bound=bound~=nil,probe=lastProbe,oncoming=beamngEarth_oncomingPass and beamngEarth_oncomingPass.status()}
+    bound=bound~=nil,probe=lastProbe,oncoming=beamngEarth_oncomingPass and beamngEarth_oncomingPass.status(),signal=signalResult,waitingForSignal=waitReported}
 end
 
 return M
