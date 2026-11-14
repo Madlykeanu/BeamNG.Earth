@@ -1407,6 +1407,10 @@ class Server:
         self.horizon_pool = ThreadPoolExecutor(1, thread_name_prefix="horizon") if self.horizon else None
         self.ahead_pool = ThreadPoolExecutor(1, thread_name_prefix="download-ahead")   # download_ahead
         self.reach_pool = ThreadPoolExecutor(1, thread_name_prefix="reach-cells")    # Connection.reach_tree's cells
+        # ... and its trees, grown here, never on the event loop: a tree's grow rebuilds the graph's index when cells came
+        # since (reach.rs grow_impl), seconds in a dense city on a busy CPU (a player's Tokyo session, dev.431: 52 event
+        # loop stalls in reach.grow, 725 s in all, the longest 51 s, every game message waiting)
+        self.reach_grow_pool = ThreadPoolExecutor(1, thread_name_prefix="reach-grow")
         self.ahead_busy = False
         self.ahead_last = None          # (anchor id, x, y) of the last round
         self.ahead_stats = {"dem": 0, "cells": 0, "deferred": 0}
@@ -10043,13 +10047,21 @@ class Connection:
                 finally:
                     r.busy = False
             self.s.reach_pool.submit(run)
-        it = self.__dict__.get("intent")
-        try:
-            return r.grow(*self.focus, *self.vel, route_xy=self.route_xy(aid),
-                          intent=it.value() if it is not None else None)
-        except Exception:
-            log.exception("reach: the time-to-reach tree")
-            return None
+        if not getattr(r, "growing", False):
+            it = self.__dict__.get("intent")
+            pose = (*self.focus, *self.vel)
+            route, intent = self.route_xy(aid), (it.value() if it is not None else None)
+            r.growing = True
+
+            def grow():
+                try:
+                    r.grow(*pose, route_xy=route, intent=intent)        # (its own GROW_EVERY_S / GROW_MOVE_M check)
+                except Exception:
+                    log.exception("reach: the time-to-reach tree")
+                finally:
+                    r.growing = False
+            self.s.reach_grow_pool.submit(grow)
+        return r.current()      # the latest tree while fresh (TREE_MAX_AGE_S), else None (distance order meanwhile)
 
     def nav_may_start(self, aid):
         """May the AI graph of anchor aid be built now? Its first one waits until half the road tiles round the car are
