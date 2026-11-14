@@ -486,6 +486,8 @@ local function readEngine(e, tgt)
   c.cirrusDensity = num(e.getCloudCirrusDensity and e.getCloudCirrusDensity(), tgt.cirrusDensity)
   c.cloudWindSpeed = num(e.getWindSpeed and e.getWindSpeed(), tgt.cloudWindSpeed)
   local d = e.getFogDensity and num((e.getFogDensity()), nil)
+  -- (the fog a fixed view distance's floor wrote is not the weather's: the density underneath it, viewFog's base)
+  if d and S.viewFogSet and S.viewFogBase and math.abs(d - S.viewFogSet) <= 1e-9 * math.max(1, d) then d = S.viewFogBase end
   local h = e.getFogAtmosphereHeight and num(e.getFogAtmosphereHeight(), nil)
   if d and h and h > 0 then
     c.fogHeight = h

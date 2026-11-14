@@ -391,6 +391,32 @@ do  -- a fixed 1 km view in real weather, then manual weather, then the real hor
   beamngEarth_settings = savedS
   run(W.LERP_S * 3)
 end
+do  -- manual weather with a fixed 1 km view, real weather briefly, manual again, then the horizon: the density from before
+  local savedS = rawget(_G, 'beamngEarth_settings')
+  local vmode = 'fixed'
+  beamngEarth_settings = { get = function(k) if k == 'viewDistanceMode' then return vmode end
+                                             if k == 'viewDistanceKm' then return 1 end end }
+  W.setMode('manual')
+  env.fog = 4e-5
+  run(1)
+  check(env.fog >= 0.003 * 0.98, 'manual, fixed 1 km: raised to the floor')
+  W.onWeather({ cover = { low = 0, mid = 0, high = 0 }, rainMmH = 0, snowCmH = 0, visM = 80000, slTempC = 12,   -- (clear)
+    wind = { ms = 2, fromDeg = 180, gustMs = 3 }, baseAglM = 1500, lat = 36.58, lon = -118.29 })
+  local floorNow = env.fog
+  W.setMode('real')
+  run(1)
+  W.setMode('manual')
+  run(1)
+  vmode = 'horizon'
+  run(1)
+  -- (real weather started from the density under the floor, not from the floor: clear weather's own fog back, far under it)
+  check(env.fog < floorNow * 0.2, 'manual -> real briefly -> manual -> horizon: the floor\'s fog let go (' .. tostring(env.fog) .. ')')
+  W.setMode('real')
+  W.onWeather({ cover = { low = 100, mid = 50, high = 0 }, rainMmH = 8, snowCmH = 0, visM = 5000, slTempC = 12,
+    wind = { ms = 5, fromDeg = 180, gustMs = 9 }, baseAglM = 600, lat = 36.58, lon = -118.29 })   -- (the weather before)
+  beamngEarth_settings = savedS
+  run(W.LERP_S * 3)
+end
 -- the settings (beamngEarth_settings.set applies the mode again, as settings.lua does)
 local saved = {}
 beamngEarth_settings = { set = function(k, v)
