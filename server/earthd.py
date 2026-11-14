@@ -10061,7 +10061,8 @@ class Connection:
                 finally:
                     r.growing = False
             self.s.reach_grow_pool.submit(grow)
-        return r.current()      # the latest tree while fresh (TREE_MAX_AGE_S), else None (distance order meanwhile)
+        # the latest tree while fresh (TREE_MAX_AGE_S) and grown near where the car is now, else None (distance order)
+        return r.current(x=self.focus[0], y=self.focus[1], speed=sp)
 
     def nav_may_start(self, aid):
         """May the AI graph of anchor aid be built now? Its first one waits until half the road tiles round the car are
