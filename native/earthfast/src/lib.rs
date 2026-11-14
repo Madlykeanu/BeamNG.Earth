@@ -109,6 +109,7 @@ mod roadtone;
 mod railbeds;
 mod osmtagshards;
 mod buildyears;
+mod buildcolours;
 mod gradebins;
 mod par;
 mod bc1fast;
@@ -6440,6 +6441,9 @@ fn earthfast(m: &Bound<'_, PyModule>) -> PyResult<()> {
     // 298: buildyears::oby_decode (a tile of the OSM building construction years, tools/build_osm_building_years.py,
     // server/osmyears.py: the towers' facades by era, buildings.plan)
     buildyears::register(m)?;
-    m.add("VERSION", 298)?;
+    // 301 (299 is the detail packs' branch, 300 a shelved branch's): buildcolours::obc_decode (a tile of the OSM
+    // building and part colours, tools/build_osm_building_colours.py, server/osmcolours.py: the colours Overture drops)
+    buildcolours::register(m)?;
+    m.add("VERSION", 301)?;
     Ok(())
 }
