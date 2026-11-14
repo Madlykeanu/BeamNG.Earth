@@ -10,6 +10,7 @@ import sys
 import unittest
 import unittest.mock
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 
@@ -45,7 +46,7 @@ class Feats:
 def layers_of(rec):
     """(buildings, parts) layers of one fixture record."""
     b = rec["building"]
-    bkeys = [k for k in b if k not in ("id", "ring")]
+    bkeys = [k for k in b if k not in ("id", "ring", "osm_start_date")]
     blayer = Feats([b["id"]], [b["ring"]], {k: [b[k]] for k in bkeys})
     pkeys = sorted({k for p in rec["parts"] for k in p if k not in ("id", "ring")})
     players = Feats([p["id"] for p in rec["parts"]], [p["ring"] for p in rec["parts"]],
@@ -333,6 +334,92 @@ class DomeTest(unittest.TestCase):
         self.assertEqual(m2.arrays()[0].tobytes(), P.tobytes(), "the same numbers every time")
 
 
+def years_of(*pairs):
+    """An osmyears.Fetch stand-in: [(src_record, year)]."""
+    import osmyears
+    kv = sorted((osmyears.key_of(r), y) for r, y in pairs)
+    return SimpleNamespace(years=lambda: (np.array([k for k, _ in kv], np.uint64),
+                                          np.array([y for _, y in kv], np.int16)))
+
+
+class EraTowerTest(unittest.TestCase):
+    """A tower's facade by its construction year (bld.tower_era; OSM's start_date through osmyears.py)."""
+
+    def _tower(self, year=None, height=120.0, cls="office", seed="T", **battrs):
+        f, ll = frame_and_lonlat()
+        b = Feats([seed], [ll(-15, -15, 30, 30)], {"class": [cls], "height": [height], "min_height": [None],
+                                                    "src_dataset": ["OpenStreetMap"], "src_record": ["w77@1"],
+                                                    **{k: [v] for k, v in battrs.items()}})
+        kw = {"years": years_of(("w77@1", year))} if year is not None else {}
+        items = bld.tile_buildings(f, -256, -256, 256, 256, [b], FLAT.__func__, **kw)
+        self.assertEqual(len(items), 1)
+        return items[0][0]
+
+    def test_thresholds(self):
+        self.assertEqual(bld.tower_era(1913), "masonry")
+        self.assertEqual(bld.tower_era(1939), "masonry")
+        self.assertEqual(bld.tower_era(1940), "mixed")
+        self.assertEqual(bld.tower_era(1969), "mixed")
+        self.assertIsNone(bld.tower_era(1970))
+        self.assertIsNone(bld.tower_era(None))
+        self.assertIsNone(bld.tower_era("x"))
+        self.assertIsNone(bld.tower_era(3000))
+        self.assertEqual(bld.era(1931), None)       # (era()'s own bands are as before)
+        self.assertEqual(bld.era(1925), "old")
+
+    @city
+    def test_a_pre_war_tower_is_masonry(self):
+        for h in (80.0, 120.0, 200.0, 443.0):       # (past SUPERTALL_M too)
+            for seed in ("A", "B", "C", "D", "E", "F"):
+                s = self._tower(1931, height=h, seed=seed)
+                self.assertNotEqual(base(s.facade), bld.OFFICE, (h, seed))
+                self.assertIn(base(s.facade), bld.FACADE_TINTS + tuple(bld.REGION_FACADE_TINTS["mediterranean"]),
+                              (h, seed, s.facade))
+
+    @city
+    def test_no_year_or_a_late_one_is_as_before(self):
+        for seed in ("A", "B", "C", "D"):
+            none = self._tower(None, height=200.0, seed=seed)
+            late = self._tower(1985, height=200.0, seed=seed)
+            self.assertEqual(base(none.facade), bld.OFFICE, "a supertall without a year: glass, as before")
+            self.assertEqual((none.facade, none.band), (late.facade, late.band))
+
+    @city
+    def test_a_mapped_material_wins(self):
+        s = self._tower(1931, height=200.0, facade_material="glass")
+        self.assertEqual(base(s.facade), bld.OFFICE)
+        s = self._tower(1931, height=200.0, facade_material="brick")
+        self.assertIn(s.facade, bld.BRICK_TINTS)
+
+    @city
+    def test_a_mapped_colour_tints_the_masonry(self):
+        s = self._tower(1931, height=200.0, facade_color="#E8DCC0")
+        self.assertEqual(base(s.facade), bld.FACADE, s.facade)
+
+    @city
+    def test_mixed_era_is_split_by_the_seed(self):
+        kinds = [base(self._tower(1955, height=200.0, seed=f"s{k}").facade) == bld.OFFICE for k in range(40)]
+        self.assertTrue(5 <= sum(kinds) <= 35, sum(kinds))
+        again = [base(self._tower(1955, height=200.0, seed=f"s{k}").facade) == bld.OFFICE for k in range(40)]
+        self.assertEqual(kinds, again)
+
+    @city
+    def test_a_low_building_is_not_a_tower(self):
+        for seed in ("A", "B", "C"):
+            self.assertEqual(self._tower(1931, height=30.0, seed=seed).facade,
+                             self._tower(1935, height=30.0, seed=seed).facade, "era() alike: no tower rule")
+
+    @city
+    def test_parts_take_their_buildings_year(self):
+        f, b, pl = PartRulesTest._building(None, [(-20, -20, 40, 40, {"height": 60.0}),
+                                                  (-10, -10, 20, 20, {"height": 200.0, "min_height": 60.0})],
+                                           height=200.0, src_record="w88@1")
+        old = tile(f, b, pl, years=years_of(("w88@1", 1930)))
+        new = tile(f, b, pl)
+        self.assertFalse([s for s, _, _ in old if base(s.facade) == bld.OFFICE])
+        self.assertTrue([s for s, _, _ in new if base(s.facade) == bld.OFFICE])
+
+
 class LandmarkRegressionTest(unittest.TestCase):
     """The comparison's landmarks from their Overture rows (fixtures/landmark_parts.json), drawn by today's rules."""
 
@@ -382,6 +469,29 @@ class LandmarkRegressionTest(unittest.TestCase):
         concrete = [s for s, _, _ in items if base(s.facade) == "bne_bridge_concrete"]
         self.assertLessEqual(len(concrete), 1, "only the base mapped concrete")
         self.assertGreater(max(top(s) for s, _, _ in items), 329.0)
+
+    def _dated(self, name, **kw):
+        rec = self.data[name]["building"]
+        return self._items(name, years=years_of((rec["src_record"], int(rec["osm_start_date"][:4]))), **kw)
+
+    def test_pre_war_landmarks_are_masonry(self):
+        """The Empire State Building (start_date 1931) and Chrysler (1930): no glass curtain wall, near or far."""
+        for name in ("empire_state", "chrysler"):
+            self.assertTrue([s for s, _, _ in self._items(name) if base(s.facade) == bld.OFFICE], "glass without")
+            items = self._dated(name)
+            self.assertFalse([s for s, _, _ in items if base(s.facade) == bld.OFFICE], name)
+            walls = [s for s, _, _ in items if s.cls != "mast" and top(s) > 100]
+            self.assertTrue(walls and all(base(s.facade) in bld.FACADE_TINTS + (bld.FACADE,) for s in walls),
+                            [s.facade for s in walls])
+            sky = self._dated(name, min_size=(bld.SKY_SLENDER_H, bld.SKY_MIN_AREA_M2), parts_min_top=bld.SKY_PARTS_MIN_M)
+            self.assertFalse([s for s, _, _ in sky if base(s.facade) == bld.OFFICE], f"{name} far away")
+
+    def test_dates_change_nothing_else(self):
+        """One WTC (2014, mapped glass), Trinity (1846) and the Capitol (1800, marble) as without their dates."""
+        for name in ("one_wtc", "trinity", "capitol"):
+            a, b = self._items(name), self._dated(name)
+            self.assertEqual([(s.facade, s.band, s.roof) for s, _, _ in a], [(s.facade, s.band, s.roof) for s, _, _ in b],
+                             name)
 
     def test_one_world_trade_center(self):
         items = self._items("one_wtc")
