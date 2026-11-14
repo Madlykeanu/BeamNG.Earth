@@ -941,7 +941,8 @@ class MapData:
         shards = self._osm_shards()
         got = shards.manifest() if shards is not None else None
         if got is not None:
-            shards.head(got[0], got[1], kind)
+            for part in got[1].get("_parts", ()):      # (each archive part's head: head() takes a part, not the
+                shards.head(got[0], part, kind)        # manifest, which failed with KeyError: 3 at every start)
 
     def _osm_geometry(self, key, kind, need):
         """{way id: lon/lat line} of the cell's tagged motorways and trunks (roadlanes.join's callback): from the tag
