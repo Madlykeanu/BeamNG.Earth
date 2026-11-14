@@ -335,7 +335,12 @@ pub(crate) fn dual_side_core(a: numpy::ndarray::ArrayView2<f64>, b: numpy::ndarr
         let (tax, tay) = (seg[k][0] / lk, seg[k][1] / lk);
         let (mut best, mut bj, mut nx, mut ny) = (f64::INFINITY, 0usize, 0.0, 0.0);
         for j in 0..mb {
-            let f = (((qx - b[[j, 0]]) * bs[j][0] + (qy - b[[j, 1]]) * bs[j][1]) / bl2[j]).clamp(0.0, 1.0);
+            let f = ((qx - b[[j, 0]]) * bs[j][0] + (qy - b[[j, 1]]) * bs[j][1]) / bl2[j];
+            // Consecutive street pieces can be close and parallel beyond an
+            // endpoint, but only an overlapping projection is beside this road.
+            if !(0.0..=1.0).contains(&f) {
+                continue;
+            }
             let (px, py) = (b[[j, 0]] + bs[j][0] * f, b[[j, 1]] + bs[j][1] * f);
             let d = (px - qx).dhypot(py - qy);    // (as np.hypot: ties at a shared vertex pick the same segment)
             if d < best {
@@ -6444,6 +6449,7 @@ fn earthfast(m: &Bound<'_, PyModule>) -> PyResult<()> {
     // 301 (299 is the detail packs' branch, 300 a shelved branch's): buildcolours::obc_decode (a tile of the OSM
     // building and part colours, tools/build_osm_building_colours.py, server/osmcolours.py: the colours Overture drops)
     buildcolours::register(m)?;
-    m.add("VERSION", 301)?;
+    // 302: require longitudinal overlap before inferring paired carriageways.
+    m.add("VERSION", 302)?;
     Ok(())
 }
