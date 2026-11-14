@@ -55,7 +55,6 @@ log = logging.getLogger("earthd.areas")
 SUBDIR = "areas"
 STORE = "areas.json"
 STORE_VERSION = 1
-MAX_AREAS = 10
 MAX_KM2 = 2500.0            # (965 square miles) an area at most
 MIN_KM2 = 0.05
 PIN_SHARE = 0.9             # saved areas may pin at most this share of the cache's cap
@@ -595,8 +594,6 @@ class Areas:
         if not est.get("ok"):
             return False, est.get("error") or "no estimate"
         with self.lock:
-            if len(self.areas) >= MAX_AREAS:
-                return False, f"at most {MAX_AREAS} saved areas: delete one first"
             cap = self.s.cache.cap if self.s.cache is not None else 0
             pinned = self.pinned_bytes or sum(a["diskBytes"] for a in self.areas)
             if cap and pinned + est.get("diskBytes", 0) > PIN_SHARE * cap:

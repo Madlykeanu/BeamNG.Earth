@@ -294,11 +294,6 @@ class AreasTest(unittest.TestCase):
         ok, why = small.add(*BOX)
         self.assertFalse(ok)
         self.assertIn("not enough room", why)
-        # at most MAX_AREAS
-        with mock.patch.object(areas, "MAX_AREAS", 1):
-            ok, why = a.add(*BOX)
-            self.assertFalse(ok)
-            self.assertIn("at most", why)
 
     def test_routes(self):
         # a corridor: the route's points and a half width; its plan walks the corridor's tiles in order along it
