@@ -10051,11 +10051,13 @@ class Connection:
             it = self.__dict__.get("intent")
             pose = (*self.focus, *self.vel)
             route, intent = self.route_xy(aid), (it.value() if it is not None else None)
+            at = time.monotonic()           # (the pose's time: the tree's age counts the queue too)
             r.growing = True
 
             def grow():
                 try:
-                    r.grow(*pose, route_xy=route, intent=intent)        # (its own GROW_EVERY_S / GROW_MOVE_M check)
+                    if time.monotonic() - at <= reachmod.TREE_MAX_AGE_S:     # (a pose queued too long: not grown)
+                        r.grow(*pose, route_xy=route, intent=intent, now=at)   # (its own GROW_EVERY_S check)
                 except Exception:
                     log.exception("reach: the time-to-reach tree")
                 finally:

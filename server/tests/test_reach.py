@@ -333,6 +333,22 @@ class CurrentTreeTest(unittest.TestCase):
         self.assertIsNone(r.current(now=100.5, x=1000.0, y=1000.0, speed=20.0), "a jump: not used")
         self.assertIsNone(r.current(now=103.0, x=0.0, y=0.0, speed=20.0), "too old: not used")
 
+    def test_a_queued_poses_tree_is_as_old_as_the_pose(self):
+        """grow(now=<the pose's time>): a pose that waited in the grow queue gives a tree that old (Codex: a pose taken
+        at t=100 and grown at t=110 was used at t=110)."""
+        r = reach.Reach.__new__(reach.Reach)
+        r.tree, r.grown_at, r.stats = None, (0.0, None), {"grow_s": 0.0, "none": 0, "trees": 0}
+        import threading
+        r.lock = threading.Lock()
+
+        class Net:
+            def grow(self, *a, **k):
+                return {"pts": np.zeros((0, 4)), "mpp": np.zeros((0, 3)), "frontier": np.zeros((0, 4)), "states": 1}
+        r.net = Net()
+        r.grow(0.0, 0.0, 20.0, 0.0, now=100.0)
+        self.assertEqual(r.tree.t, 100.0)
+        self.assertIsNone(r.current(now=110.0, x=20.0, y=0.0, speed=20.0), "grown late from an old pose: not used")
+
 
 class AheadPointsTest(unittest.TestCase):
     def test_along_the_tree_and_its_frontier(self):
