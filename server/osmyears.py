@@ -22,6 +22,7 @@ them). A newer manifest is fetched and pinned in the background (MapData.warm_ma
 
 Data (c) OpenStreetMap contributors, ODbL 1.0 (Layercake: OpenStreetMap US).
 """
+import hashlib
 import logging
 import os
 import re
@@ -89,10 +90,12 @@ class YearShards(osmtagshards.TagShards):
             except (OSError, ValueError, TypeError):
                 m = None
             parts = osmtagshards.parts_of(m) if isinstance(m, dict) else None
-            if parts is not None and isinstance(m.get("built"), str) and 0 < len(m["built"]) <= 256 \
+            checks = pinned_parts(m) if parts is not None else None
+            if checks is not None and isinstance(m.get("built"), str) and 0 < len(m["built"]) <= 256 \
                     and m.get("format") == self.FORMAT and isinstance(m.get("zoom"), int) and 0 < m["zoom"] <= 14:
                 m["_parts"] = parts
                 m["_firsts"] = [p[0] for p in parts]
+                m["_checks"] = checks
                 got = (m["built"], m)
         with self._lock:
             if self._frozen is self._UNSET:
@@ -100,6 +103,21 @@ class YearShards(osmtagshards.TagShards):
                 if got is not None:
                     self._man = got
             return self._frozen
+
+    def _check_head(self, part, b):
+        got = self.frozen()
+        want = got[1]["_checks"].get(part[3]) if got is not None else None
+        if want is None or hashlib.sha256(bytes(b)).hexdigest() != want[0]:
+            raise osmtagshards.ShardError(f"{self.LABEL}: {part[2]}: not the archive build {got and got[0]} names")
+
+    def _check_size(self, url, total):
+        got = self.frozen()
+        if got is None:
+            return
+        for p in got[1]["_parts"]:
+            if self._url(p) == url and got[1]["_checks"][p[3]][1] != total:
+                raise osmtagshards.Changed(f"{self.LABEL}: {url}: {total} bytes, its manifest names "
+                                           f"{got[1]['_checks'][p[3]][1]}")
 
     def manifest(self):
         """The frozen build (never a newer one: the tiles' keys name it); None during DOWN_S (a tile failed)."""
@@ -132,6 +150,25 @@ def shards(md):
         if got is None:
             got = _SHARDS[k] = YearShards(cache_dir, fetcher)
         return got
+
+
+def pinned_parts(m):
+    """{part subfolder (parts_of's "p<i>"): (head_sha256, bytes)} of manifest m, or None when m does not pin every part
+    to its build: an archive in the build's own folder (m["key"]: "<key>/osmyears-000.pmtiles", immutable once
+    published), with its first read's digest and its size (Codex review of b1f2499b: fixed names let a process
+    frozen on one build read the next one's tiles under the old identity)."""
+    key = m.get("key") if isinstance(m, dict) else None
+    ps = m.get("parts") if isinstance(m, dict) else None
+    if not isinstance(key, str) or not re.fullmatch(r"[0-9A-Za-z_.-]{4,80}", key) or not isinstance(ps, list):
+        return None
+    out = {}
+    for i, p in enumerate(ps):
+        a, h, n = p.get("archive"), p.get("head_sha256"), p.get("bytes")
+        if not isinstance(a, str) or f"{key}/" not in a or not isinstance(h, str) \
+                or not re.fullmatch(r"[0-9a-f]{64}", h) or not isinstance(n, int) or n < 127:
+            return None
+        out[f"p{i}"] = (h, n)
+    return out
 
 
 def identity(md):

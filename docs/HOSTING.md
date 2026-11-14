@@ -266,9 +266,12 @@ Pre-computed road plans and cell facts for popular places, for exactly one serve
   on Pages.
 - **OSM building years (not published yet):** `osmyears/<key>/osmyears-NNN.pmtiles`, the construction years
   (start_date) of OSM's dated buildings from Layercake's buildings file (`tools/build_osm_building_years.py`, ~17 M
-  rows, an estimated 50-60 MB per build; it reads the file's id, type, start_date and bbox columns, ~9 GB). Its
-  manifest goes on Pages as `osmyears/manifest.json`; the server (`server/osmyears.py`) asks for nothing else until
-  that exists.
+  rows, an estimated 50-60 MB per build; it reads the file's id, type, start_date and bbox columns, ~9 GB). Each
+  build's parts are in a folder of their own (`<key>/osmyears-NNN.pmtiles`, the manifest's `"key"`) and never change
+  once uploaded: a server keeps reading the build it started on, so keep the last 3 build folders and upload the
+  folder before the manifest. The manifest pins each part's size and the SHA-256 of its first 16 KB (header and
+  root directory); a part that does not match is not read. Its manifest goes on Pages as `osmyears/manifest.json`;
+  the server (`server/osmyears.py`) asks for nothing else until that exists.
 - **How often:** weekly, Fridays 03:17 UTC (a new OpenStreetMap planet appears on Thursdays).
 - **Housekeeping:** old `osmtags/<key>/` and `data/` keys are not pruned automatically yet.
 

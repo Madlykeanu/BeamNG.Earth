@@ -51,7 +51,7 @@ class FakeFetcher:
             return netfetch.Response(200, body, {})
         a, b = headers["Range"].split("=")[1].split("-")
         a, b = int(a), min(int(b), len(body) - 1)
-        return netfetch.Response(206, body[a:b + 1], {"etag": '"y1"'})
+        return netfetch.Response(206, body[a:b + 1], {"etag": '"y1"', "content-range": f"bytes {a}-{b}/{len(body)}"})
 
 
 def write_parquet(path, rows, group_rows=8):
@@ -176,8 +176,20 @@ class BuildAndReadTest(unittest.TestCase):
         self.assertEqual((m["format"], m["zoom"]), (1, 12))
         self.assertEqual(m["rows"], sum(len(by.cut(*self._rows())[t][0]) for t in by.cut(*self._rows())))
         self.assertGreaterEqual(len(m["parts"]), 2, "parts of at most 480 bytes")
+        key = m["key"]
+        self.assertRegex(key, r"^\d{8}T\d{6}Z-[0-9a-f]{8}$")
         self.assertEqual([p["archive"] for p in m["parts"]],
-                         [f"osmyears-{i:03d}.pmtiles" for i in range(len(m["parts"]))])
+                         [f"{key}/osmyears-{i:03d}.pmtiles" for i in range(len(m["parts"]))])
+        import hashlib
+        for p in m["parts"]:
+            b = open(os.path.join(self.out, p["archive"]), "rb").read()
+            self.assertEqual((p["head_sha256"], p["sha256"], p["bytes"]),
+                             (hashlib.sha256(b[:by.HEAD_BYTES]).hexdigest(), hashlib.sha256(b).hexdigest(), len(b)))
+        self.assertEqual(by.HEAD_BYTES, __import__("osmtagshards").HEAD_BYTES)
+        self.assertIsNotNone(osmyears.pinned_parts(m))
+        for bad in (dict(m, key=None), dict(m, parts=[dict(m["parts"][0], head_sha256=None)]),
+                    dict(m, parts=[dict(m["parts"][0], archive="osmyears-000.pmtiles")])):
+            self.assertIsNone(osmyears.pinned_parts(bad), "a part not pinned to its build: not read")
 
     def _rows(self):
         got = [r for r in ROWS if r[0] in ("way", "relation") and r[2] and r[2] != "unknown"]
@@ -290,8 +302,12 @@ class BuildAndReadTest(unittest.TestCase):
         arch = os.path.join(self.tmp, "hostile.pmtiles")
         by.ots.write_pmtiles(arch, [(t, 0, 1 << 30, 1)], data, (-180.0, -85.0, 180.0, 85.0), 1, by.SHARD_ZOOM,
                              title="x", fmt="oby1")
-        m = dict(self.man, parts=[{"archive": "hostile.pmtiles", "first": t, "last": t, "bytes": 1, "tiles": 1}])
-        files = {f"{BASE}/manifest.json": json.dumps(m).encode(), f"{BASE}/hostile.pmtiles": open(arch, "rb").read()}
+        import hashlib
+        body = open(arch, "rb").read()
+        m = dict(self.man, key="hostile1", parts=[{"archive": "hostile1/hostile.pmtiles", "first": t, "last": t,
+                                                   "bytes": len(body), "tiles": 1,
+                                                   "head_sha256": hashlib.sha256(body[:16384]).hexdigest()}])
+        files = {f"{BASE}/manifest.json": json.dumps(m).encode(), f"{BASE}/hostile1/hostile.pmtiles": body}
         frame = geodesy.EnuFrame(LAT0, LON0)
         with mock.patch.object(osmyears, "BASE", BASE):
             md = self.pinned(files)
@@ -301,6 +317,95 @@ class BuildAndReadTest(unittest.TestCase):
         ranges = [r for n, r in md.fetcher.seen if n == "hostile.pmtiles"]
         self.assertTrue(ranges)
         self.assertTrue(all(int(r.split("-")[1]) < (1 << 20) for r in ranges), ranges)
+
+    def _republished(self):
+        """(files of build A, files of build B): B built from other rows (Empire State 1999), in its own folder."""
+        rows = [r if r[1] != 34633854 else ("way", 34633854, "1999", r[3]) for r in ROWS]
+        pq = os.path.join(self.tmp, "b.parquet")
+        write_parquet(pq, rows)
+        out_b = os.path.join(self.tmp, "out_b")
+        import time as _t
+        _t.sleep(1.1)                               # (another build time: another key)
+        with mock.patch.object(by.ots, "PART_SLACK", 400):
+            man_b = by.build(pq, out_b, workers=1, log=lambda s: None, part_bytes=480)
+        fb = {}
+        for p in man_b["parts"]:
+            fb[f"{BASE}/{p['archive']}"] = open(os.path.join(out_b, p["archive"]), "rb").read()
+        fb[f"{BASE}/manifest.json"] = open(os.path.join(out_b, "manifest.json"), "rb").read()
+        return man_b, fb
+
+    def test_a_frozen_build_reads_its_own_archive_after_a_republish(self):
+        """Frozen on A, B published (A's folder kept): an uncached part is read from A's folder, A's years."""
+        man_b, fb = self._republished()
+        self.assertNotEqual(man_b["key"], self.man["key"])
+        frame = geodesy.EnuFrame(LAT0, LON0)
+        files = self.files()
+        with mock.patch.object(osmyears, "BASE", BASE):
+            md = self.pinned(files)
+            self.assertEqual(osmyears.identity(md), self.man["built"])     # (frozen on A, nothing read yet)
+            files.update(fb)                                                # (B published, A's folder kept)
+            yrs = osmyears.Fetch(frame, -300, -300, 300, 300, md).years()
+            self.assertEqual(osmyears.lookup(yrs, ["w34633854@1"]).tolist(), [1931], "A's year, not B's 1999")
+
+    def test_a_frozen_build_never_reads_another_under_its_name(self):
+        """Frozen on A, A's part URLs then serving B's bytes (a publisher that overwrote them) or gone: faulted, never
+        B's years under A's identity."""
+        man_b, fb = self._republished()
+        frame = geodesy.EnuFrame(LAT0, LON0)
+        files = self.files()
+        with mock.patch.object(osmyears, "BASE", BASE):
+            md = self.pinned(files)
+            self.assertEqual(osmyears.identity(md), self.man["built"])
+            pa = [p["archive"] for p in self.man["parts"]]
+            pb = [p["archive"] for p in man_b["parts"]]
+            for a, b in zip(pa, pb):                # (A's names, B's bytes)
+                files[f"{BASE}/{a}"] = fb[f"{BASE}/{b}"]
+            n0 = revisit.faults()
+            self.assertIsNone(osmyears.Fetch(frame, -300, -300, 300, 300, md).years())
+            self.assertEqual(revisit.faults(), n0 + 1)
+        md2 = self.pinned(self.files())
+        with mock.patch.object(osmyears, "BASE", BASE):
+            md2 = self.pinned(self.files())
+            self.assertEqual(osmyears.identity(md2), self.man["built"])
+            for a in [p["archive"] for p in self.man["parts"]]:     # (A's folder pruned)
+                md2.fetcher.files.pop(f"{BASE}/{a}")
+            n0 = revisit.faults()
+            self.assertIsNone(osmyears.Fetch(frame, -300, -300, 300, 300, md2).years())
+            self.assertEqual(revisit.faults(), n0 + 1)
+
+    def test_a_part_of_another_size_is_not_read(self):
+        files = self.files()
+        m = json.loads(files[f"{BASE}/manifest.json"])
+        for p in m["parts"]:
+            p["bytes"] += 1
+        files[f"{BASE}/manifest.json"] = json.dumps(m).encode()
+        frame = geodesy.EnuFrame(LAT0, LON0)
+        with mock.patch.object(osmyears, "BASE", BASE):
+            md = self.pinned(files)
+            n0 = revisit.faults()
+            self.assertIsNone(osmyears.Fetch(frame, -300, -300, 300, 300, md).years())
+            self.assertEqual(revisit.faults(), n0 + 1)
+
+    def test_a_cached_head_of_another_archive_is_read_again(self):
+        """A head on disk that is not the frozen build's (a copy of B's): dropped and read again, checked."""
+        frame = geodesy.EnuFrame(LAT0, LON0)
+        with mock.patch.object(osmyears, "BASE", BASE):
+            md = self.pinned()
+            yrs = osmyears.Fetch(frame, -300, -300, 300, 300, md).years()
+            sh = osmyears.shards(md)
+            heads = [os.path.join(d, "head.bin") for d, _, fs in os.walk(sh._dir(self.man["built"]))
+                     if "head.bin" in fs]
+            self.assertTrue(heads)
+            fresh = SimpleNamespace(fetcher=FakeFetcher(self.files()), cache_dir=md.cache_dir)  # (another process)
+            shutil.rmtree(os.path.join(sh._dir(self.man["built"]), "tiles"))     # (the tiles read again too)
+            for h in heads:
+                with open(h, "r+b") as f:
+                    f.seek(200)
+                    f.write(b"\xff\xff")
+            got = osmyears.Fetch(frame, -300, -300, 300, 300, fresh).years()
+            self.assertEqual(osmyears.lookup(got, ["w34633854@1"]).tolist(), [1931])
+            self.assertTrue([r for n, r in fresh.fetcher.seen if r == "bytes=0-16383"], "the head read again")
+        self.assertEqual(osmyears.lookup(yrs, ["w34633854@1"]).tolist(), [1931])
 
     def _tile_of(self, lat, lon):
         import math

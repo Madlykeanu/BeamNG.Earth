@@ -16,10 +16,17 @@ The year (YEAR_SQL, DuckDB): the first four-digit year 1000-2100 in the value ("
 "early C20", "late C19" its middle (1850), 15 or 85 into it; anything else (no year in it) left out.
 
 Output, in OUT_DIR:
-- osmyears-000.pmtiles, ...: the tiles in tile-id order in parts of at most --part-bytes each, every part a whole
-  PMTiles v3 archive (tile type 0: the blob below, raw deflate; gzip directories; zoom SHARD_ZOOM only; clustered).
-- manifest.json: {"format", "zoom", "built", "source", "source_etag", "parts": [{"archive", "first", "last",
-  "bytes", "tiles"}, ...], "bytes", "tiles", "rows", "license"} (osmtagshards.parts_of reads the parts).
+- <key>/osmyears-000.pmtiles, ...: the tiles in tile-id order in parts of at most --part-bytes each, every part a
+  whole PMTiles v3 archive (tile type 0: the blob below, raw deflate; gzip directories; zoom SHARD_ZOOM only;
+  clustered). <key> (the build time and a digest of its parts, "20261114T065758Z-1a2b3c4d") is the build's own
+  folder: its files never change once published (a server keeps reading the build it started on: osmyears.frozen;
+  fixed names let a process frozen on one build read the next one's header and tiles under the old identity, Codex
+  review of b1f2499b). Publish the folder before the manifest, and keep the last KEEP_BUILDS folders.
+- manifest.json: {"format", "zoom", "built", "key", "source", "source_etag", "parts": [{"archive": "<key>/...",
+  "first", "last", "bytes", "tiles", "head_sha256", "sha256"}, ...], "bytes", "tiles", "rows", "license"}
+  (osmtagshards.parts_of reads the parts). head_sha256: of the part's first HEAD_BYTES (or all of a shorter part),
+  the read a server starts with (header and root directory): one that does not match is not read; sha256: the whole
+  part (the publisher's upload check).
 
 A tile holds every dated building whose float32 bbox touches it (a building on a tile edge is in both). Blob (OBY1,
 earthfast buildyears.rs): "OBY1", uv n, n x uv key deltas (ascending, one row a key: 2 x the OSM id, + 1 for a
@@ -29,6 +36,7 @@ The file is rewritten in place weekly: its ETag is read before and after (the ma
 between fails the build. Data (c) OpenStreetMap contributors, ODbL 1.0 (Layercake: OSM US, the same licence).
 """
 import argparse
+import hashlib
 import json
 import os
 import shutil
@@ -46,6 +54,8 @@ FORMAT = 1
 SHARD_ZOOM = 12
 PART_BYTES = ots.PART_BYTES
 TILE_MAGIC = b"OBY1"
+HEAD_BYTES = 16384              # (osmtagshards.HEAD_BYTES: a part's first read)
+KEEP_BUILDS = 3                 # build folders a publisher keeps (a running server reads the one it started on)
 YEAR_BASE = 1900
 SOURCE = "https://data.openstreetmap.us/layercake/buildings.parquet"
 
@@ -183,10 +193,26 @@ def build(src, out, bbox=None, workers=4, log=print, z=SHARD_ZOOM, part_bytes=PA
                 at += len(blob)
                 n_rows += len(k)
         lo = bbox or (-180.0, -85.0511, 180.0, 85.0511)
-        manifest = {"format": FORMAT, "zoom": z, "built": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        built = time.gmtime()
+        manifest = {"format": FORMAT, "zoom": z, "built": time.strftime("%Y-%m-%dT%H:%M:%SZ", built),
                     "source": src if src.startswith("http") else os.path.basename(src), "source_etag": etag0}
-        parts = ots.write_parts(out, entries, data_path, lo, n_rows, z, 16384 - 127, part_bytes, prefix="osmyears",
+        work = os.path.join(out, ".parts-tmp")
+        shutil.rmtree(work, ignore_errors=True)
+        os.makedirs(work)
+        parts = ots.write_parts(work, entries, data_path, lo, n_rows, z, 16384 - 127, part_bytes, prefix="osmyears",
                                 title="BeamNG.Earth OSM building years", fmt=f"oby{FORMAT}")
+        digest = hashlib.sha256()
+        for p in parts:
+            with open(os.path.join(work, p["archive"]), "rb") as f:
+                b = f.read()
+            p["head_sha256"] = hashlib.sha256(b[:HEAD_BYTES]).hexdigest()
+            p["sha256"] = hashlib.sha256(b).hexdigest()
+            digest.update(p["sha256"].encode())
+        key = f"{time.strftime('%Y%m%dT%H%M%SZ', built)}-{digest.hexdigest()[:8]}"
+        os.replace(work, os.path.join(out, key))
+        for p in parts:
+            p["archive"] = f"{key}/{p['archive']}"
+        manifest["key"] = key
         manifest.update(parts=parts, bytes=sum(p["bytes"] for p in parts), tiles=len(entries), rows=n_rows,
                         license="ODbL 1.0, (c) OpenStreetMap contributors")
         if bbox is not None:

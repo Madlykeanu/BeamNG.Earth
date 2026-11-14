@@ -133,6 +133,12 @@ class TagShards:
     MAX_TILE_BYTES = None
     MAX_LEAF_BYTES = None
 
+    def _check_head(self, part, b):
+        """Raise ShardError when part's first read b is not the one its manifest names (osmyears: head_sha256)."""
+
+    def _check_size(self, url, total):
+        """Raise ShardError when the archive at url is not the size its manifest names (osmyears: the part's bytes)."""
+
     def _bound(self, what, n, cap):
         if cap is not None and not 0 <= n <= cap:
             raise ShardError(f"{self.LABEL}: a {what} of {n} bytes (at most {cap})")
@@ -224,6 +230,9 @@ class TagShards:
         if r.status != 206 or not (n == end - start or (short_ok and 127 <= n < end - start)):
             raise ShardError(f"{url}: HTTP {r.status}, {n} bytes for {start}-{end - 1}")
         tag = (r.headers.get("etag") or "").strip()
+        cr = str(r.headers.get("content-range") or "")
+        if "/" in cr and cr.rsplit("/", 1)[1].strip().isdigit():
+            self._check_size(url, int(cr.rsplit("/", 1)[1]))
         if etag and tag and tag != etag:
             raise Changed(f"{url}: ETag {tag}, its directories cached at {etag}")
         return r.body, tag
@@ -264,8 +273,16 @@ class TagShards:
                 etag = json.load(f).get("etag")
         except (OSError, ValueError):
             b = None
+        if b is not None:
+            try:
+                self._check_head(part, b)
+            except ShardError:              # (a copy of another archive on disk: read again, checked again)
+                import shutil
+                shutil.rmtree(d, ignore_errors=True)
+                b = None
         if b is None:
             b, etag = self._get(url, 0, HEAD_BYTES, kind, short_ok=True)
+            self._check_head(part, b)
             _write(os.path.join(d, "head.bin"), b)
             _write(os.path.join(d, "head.json"), json.dumps({"etag": etag}).encode())
         h = fast._ef.pmt_header(b)
