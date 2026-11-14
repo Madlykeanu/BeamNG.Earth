@@ -320,6 +320,8 @@ def parse_color(val):
     s = OVERTURE_HEX.get(s, s)
     if s in COLOR_NAMES:
         return COLOR_NAMES[s]
+    if s.replace("_", "") in COLOR_NAMES:     # ("light_gray", "dark-grey": OSM's spellings of the names)
+        return COLOR_NAMES[s.replace("_", "")]
     if s.startswith("#"):
         hex_str = s[1:]
         if len(hex_str) in (3, 4):
@@ -1107,13 +1109,18 @@ def plan(ring, attrs, neighbours=0, lat=None, lon=None, look=None, town=False, d
     # was siding with 14 storeys of windows): plain steel, no windows, its mapped roof kept (mapped_pitch: a spire)
     # (not a slender part the map gives a sloped roof: a tower's crown fins, Manhattan's 133 mapped skillions drawn as
     # flat steel masts, streets.gl study 2026-11-11)
+    # (nor a part standing on the ground, unless mapped steel: a mast stands on its building, and a part mapped from
+    # the ground to just over its roof is a chimney stack, a turret or a corner bay of the walls: The Plaza's eight
+    # stacks and turrets, 86-93 m on 17-81 m² over its 85 m roof, were bare steel masts; streets.gl / Google Earth
+    # comparison 2026-11-14)
     if area <= MAST_MAX_M2 and h is not None and np.isfinite(h) and h >= MAST_MIN_H and not attrs.get("bridge_part") \
             and ROOF_ALIASES.get((attrs.get("roof_shape") or "").lower(), (attrs.get("roof_shape") or "").lower()) \
             not in ("skillion", "gabled", "hipped", "half-hipped") \
             and (str(attrs.get("facade_material") or "").lower() in MAST_MATERIALS
                  or (h / math.sqrt(max(area, 1.0)) >= MAST_SLENDER
-                     and (not part or float(attrs.get("_part_min") or 0.0) + h
-                          >= MAST_TOP_SHARE * float(attrs["building_height"])))):
+                     and (not part or (float(attrs.get("_part_min") or 0.0) > 0.0
+                                       and float(attrs.get("_part_min") or 0.0) + h
+                                       >= MAST_TOP_SHARE * float(attrs["building_height"]))))):
         look = custom_look(METALWALL, MAST_RGB)
         mroof = ROOF_ALIASES.get((attrs.get("roof_shape") or "").lower(), (attrs.get("roof_shape") or "").lower())
         rh_m = mapped_roof_h(mroof, attrs.get("roof_height")) if mroof == "pyramidal" else None
