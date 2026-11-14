@@ -288,6 +288,23 @@ T.check(amountSet == nil and vars.activeAmount == 1, 'a higher preset later: the
 vars.activeAmount = math.huge
 quality('medium')
 step()
+T.check(vars.activeAmount == math.huge, 'medium again after an outside change: the cap stays suspended')
+gameplay_parking.setupVehicles(5)                                 -- a new fleet: the cap may apply again
+vars.activeAmount = math.huge
+step()
+T.check(vars.activeAmount == P.ACTIVE_CAP.medium, 'a new fleet: capped again')
+vars.activeAmount, amountSet = 4, nil                             -- a mission / another mod: above the cap
+step()
+step()
+T.check(amountSet == nil and vars.activeAmount == 4, 'an outside amount above the cap: kept, not capped again')
+quality('high')
+step()
+quality('medium')
+step()
+T.check(amountSet == nil and vars.activeAmount == 4, '... also across preset changes, until a new fleet')
+gameplay_parking.setupVehicles(5)
+vars.activeAmount = math.huge
+step()
 T.check(vars.activeAmount == P.ACTIVE_CAP.medium, 'capped again')
 gameplay_parking.setupVehicles(5)                                 -- a new fleet (hooked: the stock setup)
 T.check(vars.activeAmount == math.huge, 'a new fleet: the capped amount goes back before the stock setup')

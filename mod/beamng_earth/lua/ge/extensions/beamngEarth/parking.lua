@@ -46,7 +46,8 @@ M.OFF_SPOT_FAR_M = 60   -- ... once the player is this far from it (a car the pl
 -- - the low quality presets keep fewer of the player's parked cars active at once (ACTIVE_CAP, the stock pool's
 --   activeAmount: the rest wait pooled and take turns on the spots ahead), only while the game's parked-car amount
 --   is its default (an amount the player chose, in the options or at level start, is kept on every preset), and only
---   while the active amount is still the one this module set (changed by anyone else: theirs).
+--   while the active amount is still the one this module set (changed by anyone else: theirs, the cap suspended
+--   until a new fleet or level).
 -- Deck A/B (ABBA, same route, the player's 5 cars, medium): physics 4.1 -> 1.6 ms a frame, 23.4 -> 24.5 fps, frames
 -- over 50 ms 1297 -> 1124, physics-led slow frames 283 -> 42 a drive (parked cars off: 27.5 fps, 0.3 ms).
 M.HIDE_M = 600          -- (the stock system places cars up to ~400 m ahead: searchPointDist + searchRadius)
@@ -323,12 +324,16 @@ function M.activeCap()
   return cap
 end
 -- The cap is ours only while the stock activeAmount is the value we set (applied); then capped is the amount it had
--- before. Anyone else changing it (the player, a mission, another mod) or a new fleet (setupVehicles) ends that.
-local capped, applied = nil, nil
+-- before. Anyone else changing it (the player, a mission, another mod) ends that and suspends the cap (theirs, any
+-- value, kept) until a new fleet (setupVehicles) or a new level; a new fleet also ends ownership.
+local capped, applied, suspended = nil, nil, false
 local function applyCap(gp)
-  if heldActive or not (gp.getParkingVars and gp.setActiveAmount) then return end
+  if heldActive or suspended or not (gp.getParkingVars and gp.setActiveAmount) then return end
   local cur = tonumber((gp.getParkingVars() or {}).activeAmount)
-  if applied ~= nil and cur ~= applied then capped, applied = nil, nil end   -- changed from outside: theirs
+  if applied ~= nil and cur ~= applied then                 -- changed from outside: theirs from now on
+    capped, applied, suspended = nil, nil, true
+    return
+  end
   local cap = M.activeCap()
   if cap and cur and cur > cap then
     if applied == nil then capped = cur end
@@ -406,7 +411,7 @@ local function hookSetup()
         and tonumber((gp.getParkingVars() or {}).activeAmount) == applied and capped then
       pcall(gp.setActiveAmount, capped)
     end
-    capped, applied = nil, nil
+    capped, applied, suspended = nil, nil, false
     if M.enabled and lastPlayer and next(spots) and (dirty or not sites) then
       lastBuild, dirty = os.clock(), false
       local ok, err = pcall(rebuild, lastPlayer)
@@ -513,7 +518,7 @@ end
 function M.reset()
   require('beamngEarth/busparked').reset()
   spots, objs, anchorId, dirty, lastBuild, sites = {}, {}, nil, false, -math.huge, nil
-  hidden, backAt, capped, applied, builtAt = {}, {}, nil, nil, nil
+  hidden, backAt, capped, applied, builtAt, suspended = {}, {}, nil, nil, nil, false
   box, lastGuard, heldActive = nil, -math.huge, nil
   started, scatterPending = false, false
   lastPlayer = nil
